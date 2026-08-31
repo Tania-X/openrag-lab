@@ -35,7 +35,7 @@ def init() -> None:
 
 @app.command()
 def ingest(
-    directory: Path = typer.Option(
+    directory: Path = typer.Option(  # noqa: B008
         Path("data/sample-data"),
         "--directory",
         "-d",
@@ -53,8 +53,8 @@ def ingest(
 
 @app.command()
 def eval(
-    csv_path: Path = typer.Option(None, "--csv", help="Evaluation CSV path."),
-    top_k: int = typer.Option(5, "--top-k"),
+    csv_path: Path = typer.Option(None, "--csv", help="Evaluation CSV path."),  # noqa: B008
+    top_k: int = typer.Option(5, "--top-k"),  # noqa: B008
 ) -> None:
     """Run evaluation against OpenRAG."""
     from openrag_lab.client import OpenRAGClient
