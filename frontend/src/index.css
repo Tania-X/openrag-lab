@@ -192,6 +192,10 @@ body {
   white-space: pre-wrap;
 }
 
+.text-secondary {
+  color: var(--text-secondary);
+}
+
 .error-text {
   color: #f87171;
   font-size: 14px;
