@@ -19,6 +19,7 @@ from openrag_lab.eval import evaluate_row, load_eval_csv, summarize_results
 from openrag_lab.ingest import ingest_directory
 from openrag_lab.metadata import dify_metadata_to_openrag_filters
 from openrag_lab.migrate import sync_eval_sets, sync_sample_data
+from openrag_lab.report import generate_report
 
 app = typer.Typer(help="OpenRAG Lab CLI")
 console = Console()
@@ -190,6 +191,21 @@ def compare(
         f"{openrag_summary.mrr:.4f}",
     )
     console.print(table)
+
+
+@app.command()
+def compare_all(
+    output: Path = typer.Option(  # noqa: B008
+        Path("docs/comparison-report.md"),
+        "--output",
+        "-o",
+        help="Markdown report output path.",
+    ),
+    top_k: int = typer.Option(5, "--top-k"),  # noqa: B008
+) -> None:
+    """Run the full Dify vs OpenRAG comparison suite and write a Markdown report."""
+    path = generate_report(top_k=top_k, output=output)
+    console.print(f"[green]Report written to {path}[/green]")
 
 
 @app.command()

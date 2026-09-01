@@ -106,3 +106,11 @@ hit@1 / hit@k / MRR
 
 > 注意：当前 Dify 知识库是 50 份金融文档，OpenRAG 是 58 份（包含额外通用文档）。
 > 直接对比通用研发运维评测集会不公平；应使用两边都覆盖的金融评测集。
+
+## 一键生成全量对比报告
+
+```bash
+uv run openrag-lab compare-all --output docs/comparison-report.md
+```
+
+会跑一遍内置的 Dify vs OpenRAG 检索对比矩阵，并生成 Markdown 报告。
