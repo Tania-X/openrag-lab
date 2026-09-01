@@ -117,3 +117,47 @@ uv run openrag-lab compare-all --output docs/comparison-report.md
 ```
 
 会跑一遍内置的 Dify vs OpenRAG 检索对比矩阵，并生成 Markdown 报告。
+
+## Web 前后端（FastAPI + React）
+
+当前已搭建最小可运行骨架：
+
+```text
+src/openrag_lab/api/     # FastAPI 后端
+frontend/                # React + Vite + TypeScript 前端
+```
+
+### 启动后端
+
+```bash
+uv sync
+uv run uvicorn openrag_lab.api.main:app --reload --port 8000
+```
+
+### 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+前端开发服务器默认：
+
+```text
+http://localhost:5173
+```
+
+它会将 `/api` 代理到：
+
+```text
+http://localhost:8000
+```
+
+当前页面：
+
+- Chat
+- Search
+- Documents
+
+后续会逐步接入知识库管理、评测、对比报告等能力。
