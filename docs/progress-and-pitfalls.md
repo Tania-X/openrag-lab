@@ -230,3 +230,55 @@ new-api 网关 :3001
 - 与 Dify 阶段结论一致：**硬性年份条件应该用 data_sources/元数据过滤**，
   过滤后年份评测从 `hit@1=8/10` 提升到 `10/10`。
 - 当前 batch 评测 hit@5 全部 100%，说明召回充足；后续可以继续看 hit@1 和 badcase。
+
+---
+
+## 七、Dify vs OpenRAG 检索对比（首批）
+
+说明：
+
+- 评测集只使用 Dify/OpenRAG 两边都覆盖的金融文档。
+- Dify 知识库 50 份，OpenRAG 58 份（多出的 8 份通用文档不参与金融对比）。
+- `baseline` = hybrid_search、无 rerank、无 metadata、无 rewrite。
+- `Dify rerank` = Dify 开启 `BAAI/bge-reranker-v2-m3`，OpenRAG 仍为原生 search（当前未暴露 rerank）。
+- `metadata` = Dify 用 `metadata_filtering_conditions`，OpenRAG 用 `data_sources` 文件过滤。
+
+### 7.1 金融 15 题
+
+| 配置 | Dify hit@1 | Dify MRR | OpenRAG hit@1 | OpenRAG MRR |
+|---|---:|---:|---:|---:|
+| baseline | 14/15 (93.3%) | 0.9667 | 11/15 (73.3%) | 0.8278 |
+| Dify rerank | 15/15 (100%) | 1.0000 | 11/15 (73.3%) | 0.8278 |
+
+### 7.2 Batch 1/2/3（各 25 题）
+
+| 评测集 | 配置 | Dify hit@1 | Dify MRR | OpenRAG hit@1 | OpenRAG MRR |
+|---|---|---|---|---|---|
+| Batch1 | baseline | 23/25 (92.0%) | 0.9400 | 24/25 (96.0%) | 0.9800 |
+| Batch1 | Dify rerank | 24/25 (96.0%) | 0.9700 | 24/25 (96.0%) | 0.9800 |
+| Batch2 | baseline | 19/25 (76.0%) | 0.8600 | 24/25 (96.0%) | 0.9800 |
+| Batch2 | Dify rerank | 24/25 (96.0%) | 0.9800 | 24/25 (96.0%) | 0.9800 |
+| Batch3 | baseline | 22/25 (88.0%) | 0.9213 | 23/25 (92.0%) | 0.9533 |
+| Batch3 | Dify rerank | 24/25 (96.0%) | 0.9800 | 23/25 (92.0%) | 0.9533 |
+
+### 7.3 异构格式（10 题）
+
+| 配置 | Dify hit@1 | Dify MRR | OpenRAG hit@1 | OpenRAG MRR |
+|---|---:|---:|---:|---:|
+| baseline | 9/10 (90.0%) | 0.9500 | 8/10 (80.0%) | 0.8833 |
+| Dify rerank | 9/10 (90.0%) | 0.9500 | 8/10 (80.0%) | 0.8833 |
+
+### 7.4 年份元数据（10 题）
+
+| 配置 | Dify hit@1 | Dify MRR | OpenRAG hit@1 | OpenRAG MRR |
+|---|---:|---:|---:|---:|
+| 无过滤 | 7/10 (70.0%) | 0.8250 | 8/10 (80.0%) | 0.8667 |
+| 有元数据过滤 | 9/10 (90.0%) | 0.9500 | 10/10 (100%) | 1.0000 |
+
+### 7.5 初步解读
+
+- 在简单金融题上，Dify 的 Rerank 优势明显，尤其 `fintech-15` 从 93.3% 提到 100%。
+- 在 Batch 2 上，OpenRAG 原生检索反而比 Dify 无 rerank 高 20 个点（96% vs 76%）。
+- 加入 Dify Rerank 后，两边 Batch1/Batch2 基本打平，Batch3 Dify 略高。
+- 年份元数据过滤两边都有效；OpenRAG 的 `data_sources` 过滤在当前 10 题上做到 100% hit@1。
+- 说明：当前对比只是“检索层”，还没有比较生成质量、引用质量、运维成本和可扩展性。

@@ -77,3 +77,32 @@ uv run openrag-lab eval --csv configs/eval/fintech-metadata-year-评测集-quest
 - [x] 元数据适配
 - [x] 评测集迁移
 - [ ] Dify vs OpenRAG 对比
+
+## Dify vs OpenRAG 对比
+
+```bash
+# 基础检索对比（两边都不开 rerank / metadata / rewrite）
+uv run openrag-lab compare --csv configs/eval/fintech-评测集-questions.csv --top-k 5
+
+# Dify 开启 Rerank 后对比
+uv run openrag-lab compare --csv configs/eval/fintech-评测集-questions.csv --top-k 5 --dify-rerank
+
+# 两边都启用元数据过滤
+uv run openrag-lab compare \
+  --csv configs/eval/fintech-metadata-year-评测集-rewrite-ab.csv \
+  --top-k 5 --use-metadata
+
+# 用 rewritten_query 做 Query Rewrite A/B
+uv run openrag-lab compare \
+  --csv configs/eval/fintech-metadata-year-评测集-rewrite-ab.csv \
+  --top-k 5 --query-field rewritten_query
+```
+
+`compare` 命令会输出同一评测集下 Dify 与 OpenRAG 的：
+
+```text
+hit@1 / hit@k / MRR
+```
+
+> 注意：当前 Dify 知识库是 50 份金融文档，OpenRAG 是 58 份（包含额外通用文档）。
+> 直接对比通用研发运维评测集会不公平；应使用两边都覆盖的金融评测集。

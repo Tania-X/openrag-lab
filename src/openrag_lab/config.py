@@ -22,6 +22,19 @@ class Settings(BaseSettings):
     openrag_api_key: str = Field(default="", alias="OPENRAG_API_KEY")
     openrag_knowledge_filter: str = Field(default="", alias="OPENRAG_KNOWLEDGE_FILTER")
 
+    # Dify comparison settings
+    dify_base_url: str = Field(default="http://localhost", alias="DIFY_BASE_URL")
+    dify_dataset_id: str = Field(default="", alias="DIFY_DATASET_ID")
+    dify_dataset_api_key: str = Field(default="", alias="DIFY_DATASET_API_KEY")
+    dify_rerank_provider: str = Field(
+        default="langgenius/siliconflow/siliconflow",
+        alias="DIFY_RERANK_PROVIDER",
+    )
+    dify_rerank_model: str = Field(
+        default="BAAI/bge-reranker-v2-m3",
+        alias="DIFY_RERANK_MODEL",
+    )
+
     eval_csv: Path = Field(default=PROJECT_ROOT / "configs/eval/fintech-eval.csv", alias="EVAL_CSV")
     dify_rag_lab_path: Path = Field(default=Path("../dify-rag-lab"), alias="DIFY_RAG_LAB_PATH")
     dify_sample_data_path: Path = Field(default=Path("../dify-rag-lab/sample-data"), alias="DIFY_SAMPLE_DATA_PATH")

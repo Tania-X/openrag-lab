@@ -40,11 +40,17 @@ class EvalResult:
     mrr: float
 
 
-def load_eval_csv(path: Path) -> list[EvalRow]:
+def load_eval_csv(path: Path, query_field: str = "auto") -> list[EvalRow]:
     """Load an evaluation CSV.
 
     Expected columns: id, question, expected_keyword.
     Optional metadata_* columns are preserved for filter-aware evaluation.
+
+    ``query_field`` selects which column is used as the search query:
+    - ``auto``: question if present, otherwise original_query
+    - ``question``: question
+    - ``original_query``: original_query
+    - ``rewritten_query``: rewritten_query
     """
     rows: list[EvalRow] = []
     with path.open(encoding="utf-8-sig") as fh:
@@ -52,16 +58,25 @@ def load_eval_csv(path: Path) -> list[EvalRow]:
             metadata = {
                 key.removeprefix("metadata_").strip(): value
                 for key, value in raw.items()
-                if key.startswith("metadata_") and value
+                if key.startswith("metadata_") and key not in {"metadata_name", "metadata_value"} and value
             }
             # Some Dify-era CSVs put metadata_name / metadata_value columns.
             if raw.get("metadata_name") and raw.get("metadata_value"):
                 metadata.setdefault(raw["metadata_name"].strip(), raw["metadata_value"].strip())
 
+            if query_field == "question":
+                question = raw.get("question") or ""
+            elif query_field == "original_query":
+                question = raw.get("original_query") or raw.get("question") or ""
+            elif query_field == "rewritten_query":
+                question = raw.get("rewritten_query") or raw.get("question") or ""
+            else:
+                question = raw.get("question") or raw.get("original_query") or ""
+
             rows.append(
                 EvalRow(
                     id=raw.get("id"),
-                    question=raw.get("question") or raw.get("original_query") or "",
+                    question=question,
                     expected_keyword=raw["expected_keyword"],
                     metadata=metadata,
                 )
