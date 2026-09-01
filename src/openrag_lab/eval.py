@@ -61,7 +61,7 @@ def load_eval_csv(path: Path) -> list[EvalRow]:
             rows.append(
                 EvalRow(
                     id=raw.get("id"),
-                    question=raw["question"] or raw.get("original_query") or "",
+                    question=raw.get("question") or raw.get("original_query") or "",
                     expected_keyword=raw["expected_keyword"],
                     metadata=metadata,
                 )
