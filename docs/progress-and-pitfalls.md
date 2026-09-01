@@ -320,3 +320,19 @@ new-api 网关 :3001
 | 异构格式 | 9/10 (90%) | 8/10 (80%) | 9/10 (90%) |
 
 结论：OpenRAG 接入 rerank 后，和 Dify 的差距明显缩小，在 Batch2 上甚至反超。
+
+---
+
+## 九、TODO
+
+- [ ] 生成层评测：Faithfulness / Answer Relevance / Citation Accuracy
+  - 用同一批问题让 Dify 和 OpenRAG 各自回答
+  - 使用 DeepSeek 或人工对回答质量打分
+- [ ] OpenRAG Chat/Agent 链路接入 Rerank
+  - 目前 `/api/v1/search` 已支持 rerank
+  - Chat/Agent 内部检索是否走同一路径需要确认并打通
+- [ ] 统计显著性
+  - hit@1 用 McNemar 检验
+  - MRR 用 Wilcoxon 符号秩检验
+- [ ] 多次运行取均值，避免单次结果偶然性
+- [ ] 全量评测集自动合成一份 `fintech-all` 基线
