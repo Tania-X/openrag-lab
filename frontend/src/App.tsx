@@ -17,7 +17,10 @@ export function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">OpenRAG Lab</div>
+        <div className="brand">
+          <img className="brand-logo" src="/logo.svg" alt="OpenRAG Lab logo" />
+          <span>OpenRAG Lab</span>
+        </div>
         {NAV_ITEMS.map((item) => (
           <button
             key={item.key}
