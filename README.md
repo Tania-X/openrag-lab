@@ -87,6 +87,9 @@ uv run openrag-lab compare --csv configs/eval/fintech-评测集-questions.csv --
 # Dify 开启 Rerank 后对比
 uv run openrag-lab compare --csv configs/eval/fintech-评测集-questions.csv --top-k 5 --dify-rerank
 
+# OpenRAG 开启 Rerank 后对比
+uv run openrag-lab compare --csv configs/eval/fintech-评测集-questions.csv --top-k 5 --openrag-rerank
+
 # 两边都启用元数据过滤
 uv run openrag-lab compare \
   --csv configs/eval/fintech-metadata-year-评测集-rewrite-ab.csv \
