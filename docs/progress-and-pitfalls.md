@@ -157,3 +157,54 @@ new-api 网关 :3001
 - 对比 Dify vs OpenRAG 的 hit@1 / MRR
 - 把 Dify 的元数据过滤设计适配到 OpenRAG
 - 沉淀 Python 工具链到 `openrag-lab`
+
+---
+
+## 五、2026-09-01 追加：OpenRAG Lab 真实 API 对齐
+
+### 已完成
+
+- `openrag-lab` 的 `client.py` 已从占位接口改为真实 OpenRAG v1 API。
+- 已同步 Dify 的 sample-data 与全部评测 CSV 到 `openrag-lab`。
+- 已支持：
+  - `list-files`
+  - 顺序批量 ingest 并等待任务完成
+  - 基于 OpenRAG search 的 `hit@1 / hit@k / MRR` 评测
+  - `year/version -> data_sources`、`doc_type -> document_types` 的元数据映射
+- 已创建 OpenRAG API Key 并写入本地 `.env`（不入库）。
+
+### 新踩坑：Langflow SQLite 再次损坏
+
+- 现象：重启 OpenRAG 后 ingest 报 `No Langflow API key available`，
+  手动创建 Langflow API key 报 `database disk image is malformed`。
+- 原因：`langflow-data/langflow.db` 损坏（历史直接改库留下的隐患再次暴露）。
+- 解决：
+  ```bash
+  docker compose stop langflow openrag-backend
+  mv langflow-data langflow-data.bak-<timestamp>
+  mkdir langflow-data
+  docker compose up -d langflow
+  # 等待 Langflow health OK
+  docker compose up -d openrag-backend
+  ```
+- 教训：不要直接改 Langflow SQLite；如果遇到损坏，优先重置 `langflow-data`。
+
+### 新踩坑：OpenRAG 后端 search embedding 没有走 new-api 网关
+
+- 现象：
+  - 第一次检索很慢，日志显示一直请求 `https://api.openai.com/v1/models`
+  - 最终 `Failed to embed with model BAAI/bge-m3`，只能退回 keyword 检索
+- 原因：
+  - OpenRAG 后端 `ModelsService.get_openai_models()` 硬编码 OpenAI 官方地址
+  - `patched_embedding_client` 创建时没有读取 `OPENAI_API_BASE / OPENAI_BASE_URL`
+  - `agentd` 的 embedding patch 对 `openai/...` 前缀模型会原样发给网关，
+    但 new-api 只认识真实的模型名 `BAAI/bge-m3`
+- 解决（本地源码补丁）：
+  1. `models_service.py`
+     - `get_openai_models()` 支持 `OPENAI_API_BASE`，不再超时访问官方
+     - `get_litellm_model_name()` 在网关模式下返回 `openai/{model_name}`
+  2. `settings.py`
+     - 创建 `AsyncOpenAI` 时传入 `base_url`
+     - 对 `embeddings.create` 做一层包装，发送前去掉 `openai/` 前缀
+  3. 将补丁同步到运行容器并重启 backend
+- 效果：第二次检索约 0.5s，向量检索正常返回。

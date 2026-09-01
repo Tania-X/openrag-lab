@@ -16,15 +16,14 @@ openrag-lab/
 ├── src/openrag_lab/
 │   ├── cli.py          # 命令行入口
 │   ├── config.py       # 配置加载
-│   ├── client.py       # OpenRAG API 客户端
+│   ├── client.py       # OpenRAG v1 API 客户端
 │   ├── ingest.py       # 文档入库
-│   ├── metadata.py     # 元数据/知识过滤
-│   ├── eval.py         # 评测脚本
+│   ├── metadata.py     # Dify 元数据 -> OpenRAG 过滤映射
+│   ├── eval.py         # 评测逻辑（hit@1 / hit@k / MRR）
 │   └── migrate.py      # Dify -> OpenRAG 迁移辅助
-├── scripts/            # 运维/初始化脚本
-├── configs/            # OpenRAG 环境与流程配置
+├── configs/eval/       # 从 dify-rag-lab 同步的评测集
 ├── data/               # 本地数据（gitignored）
-└── docs/               # 设计文档
+└── docs/               # 设计文档与踩坑记录
 ```
 
 ## 快速开始
@@ -35,15 +34,46 @@ cp .env.example .env
 # 编辑 .env 填写 OpenRAG 地址与 API Key
 
 uv run openrag-lab init
-uv run openrag-lab ingest --help
-uv run openrag-lab eval --help
+uv run openrag-lab list-files
+uv run openrag-lab ingest --directory data/sample-data
+uv run openrag-lab eval --csv configs/eval/评测集-questions.csv --top-k 5
+```
+
+## 已对齐的 OpenRAG API
+
+`client.py` 已经对接 OpenRAG v0.7.0 的公开 v1 API：
+
+- `GET /api/health`
+- `POST /api/v1/search`
+- `POST /api/v1/chat`
+- `POST /api/v1/documents/ingest`
+- `GET /api/v1/tasks/{task_id}`
+- `GET /api/v1/files/get_all`
+- `POST /api/v1/knowledge-filters`
+
+## 元数据适配策略
+
+OpenRAG 的 search filter 是：
+
+```text
+data_sources      -> 文件名列表
+document_types    -> MIME 类型列表
+owners            -> 属主
+connector_types   -> 连接器类型
+```
+
+Dify 的 `year` / `version` 元数据在 OpenRAG 中更适合映射为 `data_sources`，
+即按文件名筛选（例如 `40-2024-支付超时处理规范.md`）。
+
+```bash
+uv run openrag-lab eval --csv configs/eval/fintech-metadata-year-评测集-questions.csv --use-metadata
 ```
 
 ## 当前状态
 
 - [x] 项目骨架
-- [ ] OpenRAG 服务启动
-- [ ] 文档入库
-- [ ] 元数据适配
-- [ ] 评测集迁移
+- [x] OpenRAG 服务启动
+- [x] 文档入库
+- [x] 元数据适配
+- [x] 评测集迁移
 - [ ] Dify vs OpenRAG 对比

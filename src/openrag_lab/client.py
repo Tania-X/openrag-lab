@@ -1,16 +1,19 @@
-"""Minimal OpenRAG API client.
+"""OpenRAG HTTP API client.
 
-OpenRAG exposes an HTTP API plus SDKs. This client is intentionally thin:
-it centralizes base URL, API key, and common request/error handling so the
+This is a thin synchronous client for the public OpenRAG v1 API.
+It centralizes base URL, API key, and common request/error handling so the
 ingestion/evaluation scripts can evolve without repeating HTTP code.
 """
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
 import httpx
+
+from openrag_lab.config import get_settings
 
 
 class OpenRAGError(RuntimeError):
@@ -18,15 +21,38 @@ class OpenRAGError(RuntimeError):
 
 
 class OpenRAGClient:
-    """A small synchronous HTTP client for OpenRAG."""
+    """A small synchronous HTTP client for OpenRAG's public API."""
 
-    def __init__(self, base_url: str, api_key: str, timeout: float = 60.0) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        timeout: float = 60.0,
+        poll_interval: float = 2.0,
+        ingest_timeout: float = 600.0,
+    ) -> None:
+        settings = get_settings()
+        self.base_url = (base_url or settings.openrag_base_url).rstrip("/")
+        self.api_key = api_key if api_key is not None else settings.openrag_api_key
         self.timeout = timeout
+        self.poll_interval = poll_interval
+        self.ingest_timeout = ingest_timeout
 
-    def _headers(self) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+        self._http = httpx.Client(timeout=timeout)
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> OpenRAGClient:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    # ── low-level helpers ──────────────────────────────────────────────
+
+    def _headers(self, multipart: bool = False) -> dict[str, str]:
+        headers = {} if multipart else {"Content-Type": "application/json"}
         if self.api_key:
             headers["X-API-Key"] = self.api_key
         return headers
@@ -35,43 +61,129 @@ class OpenRAGClient:
         return f"{self.base_url}{path}"
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        multipart = kwargs.pop("multipart", False)
         try:
-            resp = httpx.request(
+            resp = self._http.request(
                 method,
                 self._url(path),
-                headers=self._headers(),
-                timeout=self.timeout,
+                headers=self._headers(multipart=multipart),
                 **kwargs,
             )
         except httpx.HTTPError as exc:
             raise OpenRAGError(f"OpenRAG request failed: {exc}") from exc
 
         if resp.is_error:
-            raise OpenRAGError(f"OpenRAG {method} {path} -> {resp.status_code}: {resp.text[:300]}")
+            raise OpenRAGError(
+                f"OpenRAG {method} {path} -> {resp.status_code}: {resp.text[:500]}"
+            )
 
         if resp.content:
             return resp.json()
         return None
 
+    # ── public endpoints ───────────────────────────────────────────────
+
     def health(self) -> dict[str, Any]:
-        """Check OpenRAG service health."""
+        """Check OpenRAG service health (through the frontend proxy)."""
         return self._request("GET", "/api/health")
 
-    def chat(self, message: str) -> dict[str, Any]:
-        """Send a chat message. Endpoint is a placeholder pending OpenRAG API docs."""
-        return self._request("POST", "/api/chat", json={"message": message})
+    def search(
+        self,
+        query: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int = 10,
+        score_threshold: float = 0.0,
+        filter_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Run semantic search against OpenRAG's public v1 API."""
+        body: dict[str, Any] = {
+            "query": query,
+            "limit": limit,
+            "score_threshold": score_threshold,
+        }
+        if filters:
+            body["filters"] = filters
+        if filter_id:
+            body["filter_id"] = filter_id
+        return self._request("POST", "/api/v1/search", json=body)
 
-    def search(self, query: str) -> dict[str, Any]:
-        """Semantic search. Endpoint is a placeholder pending OpenRAG API docs."""
-        return self._request("POST", "/api/search", json={"query": query})
+    def chat(
+        self,
+        message: str,
+        *,
+        filters: dict[str, Any] | None = None,
+        limit: int = 10,
+        score_threshold: float = 0.0,
+        filter_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Send a chat message via OpenRAG's public v1 API."""
+        body: dict[str, Any] = {
+            "message": message,
+            "stream": False,
+            "limit": limit,
+            "score_threshold": score_threshold,
+        }
+        if filters:
+            body["filters"] = filters
+        if filter_id:
+            body["filter_id"] = filter_id
+        return self._request("POST", "/api/v1/chat", json=body)
 
     def upload_document(self, path: Path) -> dict[str, Any]:
-        """Upload a document. Endpoint is a placeholder pending OpenRAG API docs."""
+        """Upload a single document and return the ingestion task response."""
         if not path.exists():
             raise FileNotFoundError(path)
         with path.open("rb") as fh:
             return self._request(
                 "POST",
-                "/api/documents",
+                "/api/v1/documents/ingest",
                 files={"file": (path.name, fh)},
+                data={"replace_duplicates": "true"},
+                multipart=True,
             )
+
+    def task_status(self, task_id: str) -> dict[str, Any]:
+        """Get the current status of an ingestion task."""
+        return self._request("GET", f"/api/v1/tasks/{task_id}")
+
+    def wait_for_task(self, task_id: str) -> dict[str, Any]:
+        """Poll an ingestion task until it completes, fails, or times out."""
+        elapsed = 0.0
+        while elapsed < self.ingest_timeout:
+            status = self.task_status(task_id)
+            if status.get("status") in ("completed", "failed"):
+                return status
+            time.sleep(self.poll_interval)
+            elapsed += self.poll_interval
+        raise OpenRAGError(f"Ingestion task {task_id} timed out after {self.ingest_timeout}s")
+
+    def ingest_file(self, path: Path, wait: bool = True) -> dict[str, Any]:
+        """Upload a file and optionally wait for its task to complete."""
+        resp = self.upload_document(path)
+        task_id = resp.get("task_id")
+        if not task_id:
+            raise OpenRAGError(f"No task_id returned for {path.name}: {resp!r}")
+        if not wait:
+            return resp
+        return self.wait_for_task(task_id)
+
+    def list_files(self) -> list[dict[str, Any]]:
+        """List all ingested files (v1 endpoint, max 500 files)."""
+        data = self._request("GET", "/api/v1/files/get_all")
+        return data.get("files", [])
+
+    def create_knowledge_filter(
+        self,
+        name: str,
+        *,
+        description: str = "",
+        query_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a reusable knowledge filter."""
+        body = {
+            "name": name,
+            "description": description,
+            "queryData": query_data or {},
+        }
+        return self._request("POST", "/api/v1/knowledge-filters", json=body)
