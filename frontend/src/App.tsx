@@ -5,29 +5,36 @@ import { DocumentsPage } from "./pages/DocumentsPage";
 
 type Tab = "chat" | "search" | "documents";
 
+const NAV_ITEMS: { key: Tab; label: string }[] = [
+  { key: "chat", label: "Chat" },
+  { key: "search", label: "Search" },
+  { key: "documents", label: "Documents" },
+];
+
 export function App() {
   const [tab, setTab] = useState<Tab>("chat");
 
   return (
-    <div style={{ maxWidth: 960, margin: "0 auto", padding: 24 }}>
-      <h1>OpenRAG Lab</h1>
-      <nav style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-        {(["chat", "search", "documents"] as Tab[]).map((item) => (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand">OpenRAG Lab</div>
+        {NAV_ITEMS.map((item) => (
           <button
-            key={item}
-            onClick={() => setTab(item)}
-            style={{
-              padding: "8px 16px",
-              fontWeight: tab === item ? 700 : 400,
-            }}
+            key={item.key}
+            className={`nav-item ${tab === item.key ? "active" : ""}`}
+            onClick={() => setTab(item.key)}
           >
-            {item}
+            {item.label}
           </button>
         ))}
-      </nav>
-      {tab === "chat" && <ChatPage />}
-      {tab === "search" && <SearchPage />}
-      {tab === "documents" && <DocumentsPage />}
+      </aside>
+      <main className="main">
+        <div className="page">
+          {tab === "chat" && <ChatPage />}
+          {tab === "search" && <SearchPage />}
+          {tab === "documents" && <DocumentsPage />}
+        </div>
+      </main>
     </div>
   );
 }

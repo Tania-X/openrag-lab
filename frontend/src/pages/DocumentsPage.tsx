@@ -16,9 +16,9 @@ export function DocumentsPage() {
   return (
     <section>
       <h2>Documents</h2>
-      {loading && <p>加载中...</p>}
-      {error && <p style={{ color: "red" }}>{error}</p>}
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      {loading && <p className="text-secondary">加载中...</p>}
+      {error && <p className="error-text">{error}</p>}
+      <table className="doc-table">
         <thead>
           <tr>
             <th>文件名</th>
