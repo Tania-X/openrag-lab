@@ -294,3 +294,29 @@ new-api 网关 :3001
 
 初步结论：在这批书面化清晰问题上，Query Rewrite 对 Dify 无增益，对 OpenRAG 甚至略降，
 与 Dify 阶段结论一致——Rewrite 不应无条件使用。
+
+---
+
+## 八、OpenRAG 已接入 Rerank
+
+### 实现方式
+
+- 在 OpenRAG 后端 `/api/v1/search` 增加可选参数：
+  - `rerank: true`
+  - `rerank_model`
+  - `rerank_top_n`
+- 通过本地 new-api 网关调用 OpenAI 兼容的 `/v1/rerank`
+- 使用模型：`BAAI/bge-reranker-v2-m3`
+- 如果 rerank 调用失败，自动回退到原始 OpenSearch 结果，不影响检索可用性
+
+### 对比效果（加入 OpenRAG rerank 后）
+
+| 实验 | Dify hit@1 | OpenRAG 无 rerank | OpenRAG rerank |
+|---|---:|---:|---:|
+| 金融 15 题 | 15/15 (100%) | 11/15 (73.3%) | 14/15 (93.3%) |
+| Batch1 | 24/25 (96%) | 24/25 (96%) | 24/25 (96%) |
+| Batch2 | 24/25 (96%) | 24/25 (96%) | 25/25 (100%) |
+| Batch3 | 24/25 (96%) | 23/25 (92%) | 24/25 (96%) |
+| 异构格式 | 9/10 (90%) | 8/10 (80%) | 9/10 (90%) |
+
+结论：OpenRAG 接入 rerank 后，和 Dify 的差距明显缩小，在 Batch2 上甚至反超。

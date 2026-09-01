@@ -76,6 +76,8 @@ def evaluate_openrag_row(
     top_k: int = 5,
     use_metadata: bool = False,
     files: list[dict[str, Any]] | None = None,
+    rerank: bool = False,
+    rerank_model: str | None = None,
 ) -> EvalResult:
     """Evaluate one row against OpenRAG search."""
     filters = (
@@ -83,7 +85,13 @@ def evaluate_openrag_row(
         if use_metadata
         else None
     )
-    data = client.search(row.question, limit=top_k, filters=filters)
+    data = client.search(
+        row.question,
+        limit=top_k,
+        filters=filters,
+        rerank=rerank,
+        rerank_model=rerank_model,
+    )
     texts: list[str] = []
     for item in data.get("results", []):
         text = item.get("text") or ""

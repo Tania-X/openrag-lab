@@ -128,6 +128,7 @@ def compare(
     csv_path: Path = typer.Option(None, "--csv", help="Evaluation CSV path."),  # noqa: B008
     top_k: int = typer.Option(5, "--top-k"),  # noqa: B008
     dify_rerank: bool = typer.Option(False, "--dify-rerank", help="Enable Dify rerank."),
+    openrag_rerank: bool = typer.Option(False, "--openrag-rerank", help="Enable OpenRAG rerank."),
     use_metadata: bool = typer.Option(False, "--use-metadata", help="Apply metadata filters on both platforms."),
     query_field: str = typer.Option("auto", "--query-field", help="auto|question|original_query|rewritten_query"),
 ) -> None:
@@ -166,6 +167,7 @@ def compare(
                 top_k=top_k,
                 use_metadata=use_metadata,
                 files=files,
+                rerank=openrag_rerank,
             )
             for row in rows
         ]

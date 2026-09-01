@@ -25,6 +25,7 @@ class CompareSpec:
     csv: str
     query_field: str = "auto"
     dify_rerank: bool = False
+    openrag_rerank: bool = False
     use_metadata: bool = False
     note: str = ""
 
@@ -42,6 +43,19 @@ DEFAULT_SPECS: list[CompareSpec] = [
         note="Dify 开启 BAAI/bge-reranker-v2-m3",
     ),
     CompareSpec(
+        name="金融 15 题 OpenRAG rerank",
+        csv="configs/eval/fintech-评测集-questions.csv",
+        openrag_rerank=True,
+        note="OpenRAG search + BAAI/bge-reranker-v2-m3",
+    ),
+    CompareSpec(
+        name="金融 15 题 双端 rerank",
+        csv="configs/eval/fintech-评测集-questions.csv",
+        dify_rerank=True,
+        openrag_rerank=True,
+        note="Dify rerank vs OpenRAG rerank",
+    ),
+    CompareSpec(
         name="Batch1 baseline",
         csv="configs/eval/fintech-batch1-评测集-questions-standard.csv",
         note="hybrid_search，无 rerank，无 metadata",
@@ -50,6 +64,17 @@ DEFAULT_SPECS: list[CompareSpec] = [
         name="Batch1 Dify rerank",
         csv="configs/eval/fintech-batch1-评测集-questions-standard.csv",
         dify_rerank=True,
+    ),
+    CompareSpec(
+        name="Batch1 OpenRAG rerank",
+        csv="configs/eval/fintech-batch1-评测集-questions-standard.csv",
+        openrag_rerank=True,
+    ),
+    CompareSpec(
+        name="Batch1 双端 rerank",
+        csv="configs/eval/fintech-batch1-评测集-questions-standard.csv",
+        dify_rerank=True,
+        openrag_rerank=True,
     ),
     CompareSpec(
         name="Batch2 baseline",
@@ -62,6 +87,17 @@ DEFAULT_SPECS: list[CompareSpec] = [
         dify_rerank=True,
     ),
     CompareSpec(
+        name="Batch2 OpenRAG rerank",
+        csv="configs/eval/fintech-batch2-评测集-questions-standard.csv",
+        openrag_rerank=True,
+    ),
+    CompareSpec(
+        name="Batch2 双端 rerank",
+        csv="configs/eval/fintech-batch2-评测集-questions-standard.csv",
+        dify_rerank=True,
+        openrag_rerank=True,
+    ),
+    CompareSpec(
         name="Batch3 baseline",
         csv="configs/eval/fintech-batch3-评测集-questions-standard.csv",
         note="hybrid_search，无 rerank，无 metadata",
@@ -72,6 +108,17 @@ DEFAULT_SPECS: list[CompareSpec] = [
         dify_rerank=True,
     ),
     CompareSpec(
+        name="Batch3 OpenRAG rerank",
+        csv="configs/eval/fintech-batch3-评测集-questions-standard.csv",
+        openrag_rerank=True,
+    ),
+    CompareSpec(
+        name="Batch3 双端 rerank",
+        csv="configs/eval/fintech-batch3-评测集-questions-standard.csv",
+        dify_rerank=True,
+        openrag_rerank=True,
+    ),
+    CompareSpec(
         name="异构格式 baseline",
         csv="configs/eval/fintech-heterogeneous-评测集-questions.csv",
         note="PDF/DOCX/XLSX/HTML/CSV",
@@ -80,6 +127,17 @@ DEFAULT_SPECS: list[CompareSpec] = [
         name="异构格式 Dify rerank",
         csv="configs/eval/fintech-heterogeneous-评测集-questions.csv",
         dify_rerank=True,
+    ),
+    CompareSpec(
+        name="异构格式 OpenRAG rerank",
+        csv="configs/eval/fintech-heterogeneous-评测集-questions.csv",
+        openrag_rerank=True,
+    ),
+    CompareSpec(
+        name="异构格式 双端 rerank",
+        csv="configs/eval/fintech-heterogeneous-评测集-questions.csv",
+        dify_rerank=True,
+        openrag_rerank=True,
     ),
     CompareSpec(
         name="年份题 无过滤",
@@ -140,6 +198,7 @@ def _run_spec(
                 top_k=top_k,
                 use_metadata=spec.use_metadata,
                 files=files,
+                rerank=spec.openrag_rerank,
             )
         )
 
@@ -216,7 +275,7 @@ def generate_report(
     lines.append("## 说明")
     lines.append("")
     lines.append("- `hit@1 / hit@5 / MRR` 均来自检索结果，不涉及 LLM 生成。")
-    lines.append("- `Dify rerank` 表示 Dify 开启 `BAAI/bge-reranker-v2-m3`；OpenRAG 当前 search API 未暴露 rerank。")
+    lines.append("- `Dify rerank` 表示 Dify 开启 `BAAI/bge-reranker-v2-m3`；`OpenRAG rerank` 表示 OpenRAG `/api/v1/search` 开启同一 reranker。")
     lines.append("- `元数据过滤` 在 Dify 使用 `metadata_filtering_conditions`，在 OpenRAG 使用 `data_sources` 文件名过滤。")
     lines.append("- Query Rewrite 使用评测集里预生成的 `rewritten_query`，不是在线调用改写服务。")
     lines.append("")

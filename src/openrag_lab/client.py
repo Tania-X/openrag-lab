@@ -95,6 +95,9 @@ class OpenRAGClient:
         limit: int = 10,
         score_threshold: float = 0.0,
         filter_id: str | None = None,
+        rerank: bool = False,
+        rerank_model: str | None = None,
+        rerank_top_n: int | None = None,
     ) -> dict[str, Any]:
         """Run semantic search against OpenRAG's public v1 API."""
         body: dict[str, Any] = {
@@ -106,6 +109,12 @@ class OpenRAGClient:
             body["filters"] = filters
         if filter_id:
             body["filter_id"] = filter_id
+        if rerank:
+            body["rerank"] = True
+            if rerank_model:
+                body["rerank_model"] = rerank_model
+            if rerank_top_n is not None:
+                body["rerank_top_n"] = rerank_top_n
         return self._request("POST", "/api/v1/search", json=body)
 
     def chat(
