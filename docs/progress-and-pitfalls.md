@@ -1,0 +1,159 @@
+# OpenRAG 探索总结：成果与踩坑记录
+
+> 记录我们从 Dify RAG 实践到 OpenRAG 探索的过程、当前成果，以及实际踩过的坑。
+
+---
+
+## 一、已有成果
+
+### 1. Dify RAG 阶段
+
+- 完成了一套可运行的金融知识库 RAG：
+  - Dify + Weaviate + Spring Boot + React
+- 知识库资产：
+  - 50 份金融文档
+  - 100+ 条评测题
+- 建立了 RAG 评测体系：
+  - hit@1 / hit@k / MRR
+  - Query Rewrite A/B 对比
+  - 元数据过滤对比
+- 核心结论：
+  - Query Rewrite 对清晰书面问题收益有限，更适合口语化/模糊问题
+  - 硬性业务条件（年份、版本、文档类型）应使用元数据过滤，而不是依赖 Rerank
+
+### 2. OpenRAG 探索阶段
+
+- 完成 OpenRAG v0.7.0 源码构建：
+  - openrag-backend
+  - openrag-frontend
+  - openrag-langflow
+  - openrag-opensearch
+- 启动并跑通：
+  - OpenRAG Frontend :3000
+  - Langflow :7860
+  - OpenSearch :9200
+  - OpenSearch Dashboards :5601
+  - Docling :5001
+- 接入 DeepSeek + SiliconFlow：
+  - 通过本地 new-api 网关统一成 OpenAI 兼容 Provider
+  - DeepSeek `deepseek-chat` 已验证可对话
+  - SiliconFlow `BAAI/bge-m3` 已验证可生成 Embedding
+- 已创建 Python 工程仓库 `openrag-lab`：
+  - 后续用于 OpenRAG 接入、评测、迁移工具
+
+---
+
+## 二、遇到的坑
+
+### 1. OpenRAG `latest` 镜像与源码 flow 版本不匹配
+
+- 现象：
+  - Chat 报 `ModuleNotFoundError: No module named 'lfx.components.models_and_agents.agent_helpers'`
+- 原因：
+  - `latest` Langflow 镜像里的 `lfx` 版本较旧
+  - OpenRAG 最新 flow 依赖新版 `lfx`
+- 解决：
+  - 固定到 `v0.7.0`
+  - 从源码重新构建匹配镜像
+
+### 2. Docker Hub 直连超时
+
+- 现象：
+  - 拉镜像 / 构建时 `i/o timeout`
+- 解决：
+  - 配置 Colima 代理
+  - 提前拉取基础镜像
+  - 构建时传 `HTTP_PROXY / HTTPS_PROXY` build args
+
+### 3. one-api 不支持 ARM Mac
+
+- 现象：
+  - `justsong/one-api` 没有 `linux/arm64` 镜像
+- 解决：
+  - 改用同源分支 `calciumion/new-api`
+  - 功能和使用方式基本一致
+
+### 4. OpenRAG 自定义 Provider 支持不完整
+
+- 现象：
+  - 配置 `deepseek` / `siliconflow` 自定义 provider 后
+  - Langflow 报缺少 `DEEPSEEK_API_KEY` / `SILICONFLOW_API_KEY`
+  - 继续修复后报 `No embedding class defined for BAAI/bge-m3 (provider: siliconflow)`
+- 原因：
+  - OpenRAG v0.7.0 的 Langflow flow 对自定义 provider 没有完整的 class mapping
+  - 不是塞 Key 就能解决的
+- 解决：
+  - 采用本地 `new-api` 网关
+  - 把 DeepSeek / SiliconFlow 统一成 OpenAI 兼容 Provider
+  - OpenRAG 使用官方支持的 OpenAI 路径
+
+### 5. 直接改 Langflow SQLite 导致数据库损坏
+
+- 现象：
+  - `sqlite3.DatabaseError: database disk image is malformed`
+- 原因：
+  - 在 Langflow 运行中直接修改 `langflow-data/langflow.db`
+- 教训：
+  - 不要直接改运行中服务的 SQLite
+  - 优先使用官方 API / UI / 后端同步机制
+
+### 6. Langflow 管理员认证失败
+
+- 现象：
+  - OpenRAG 后端无法登录 Langflow
+  - 报 `500 Internal Server Error` on `/api/v1/login`
+- 解决：
+  - 设置 `LANGFLOW_ENABLE_SUPERUSER_CLI=true`
+  - 重新初始化 Langflow 管理员账号
+  - 后端可正常同步 flow 和全局变量
+
+### 7. new-api Embedding 404
+
+- 现象：
+  - 网关转发 Embedding 请求到 SiliconFlow 返回 404
+- 原因：
+  - SiliconFlow 渠道 `base_url` 配成了 `https://api.siliconflow.cn/v1`
+  - new-api 会再拼接 `/v1`，导致变成 `/v1/v1/embeddings`
+- 解决：
+  - `base_url` 改为 `https://api.siliconflow.cn`
+
+### 8. new-api 模型价格未配置
+
+- 现象：
+  - Embedding 报 `模型 BAAI/bge-m3 的价格未配置`
+- 解决：
+  - 开启自用模式：
+    - `PUT /api/option/`
+    - `{"key":"SelfUseModeEnabled","value":true}`
+
+---
+
+## 三、当前架构
+
+```text
+OpenRAG
+  ├── Frontend :3000
+  ├── Backend
+  ├── Langflow :7860
+  ├── OpenSearch :9200
+  └── Docling :5001
+        │
+        │  OpenAI 兼容
+        ▼
+new-api 网关 :3001
+  ├── DeepSeek
+  │     deepseek-chat
+  └── SiliconFlow
+        BAAI/bge-m3
+        BAAI/bge-reranker-v2-m3
+```
+
+---
+
+## 四、后续计划
+
+- 将 Dify 的 50 份文档迁移到 OpenRAG
+- 将 100+ 条评测集在 OpenRAG 上跑一轮
+- 对比 Dify vs OpenRAG 的 hit@1 / MRR
+- 把 Dify 的元数据过滤设计适配到 OpenRAG
+- 沉淀 Python 工具链到 `openrag-lab`
