@@ -282,3 +282,15 @@ new-api 网关 :3001
 - 加入 Dify Rerank 后，两边 Batch1/Batch2 基本打平，Batch3 Dify 略高。
 - 年份元数据过滤两边都有效；OpenRAG 的 `data_sources` 过滤在当前 10 题上做到 100% hit@1。
 - 说明：当前对比只是“检索层”，还没有比较生成质量、引用质量、运维成本和可扩展性。
+
+### 7.6 Query Rewrite A/B（使用评测集预生成的 rewritten_query）
+
+金融 15 题：
+
+| Query | Dify hit@1 | Dify MRR | OpenRAG hit@1 | OpenRAG MRR |
+|---|---:|---:|---:|---:|
+| original_query | 14/15 (93.3%) | 0.9667 | 11/15 (73.3%) | 0.8278 |
+| rewritten_query | 14/15 (93.3%) | 0.9667 | 10/15 (66.7%) | 0.7889 |
+
+初步结论：在这批书面化清晰问题上，Query Rewrite 对 Dify 无增益，对 OpenRAG 甚至略降，
+与 Dify 阶段结论一致——Rewrite 不应无条件使用。
