@@ -80,9 +80,7 @@ OpenSearch / Langflow / new-api
       "page": 0,
       "mimetype": "text/markdown"
     }
-  ],
-  "aggregations": {},
-  "total": 1
+  ]
 }
 ```
 

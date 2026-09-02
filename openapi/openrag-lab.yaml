@@ -145,10 +145,6 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SearchResult"
-        aggregations:
-          type: object
-        total:
-          type: integer
 
     ChatRequest:
       type: object
