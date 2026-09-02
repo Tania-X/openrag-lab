@@ -1,0 +1,273 @@
+openapi: 3.0.3
+info:
+  title: OpenRAG Public API (used by OpenRAG Lab)
+  version: 0.7.1
+  description: OpenRAG Lab 当前调用的 OpenRAG Public API 子集。
+servers:
+  - url: http://localhost:3000
+    description: OpenRAG frontend proxy
+
+security:
+  - ApiKeyAuth: []
+
+paths:
+  /api/v1/search:
+    post:
+      summary: OpenRAG semantic search with optional rerank
+      operationId: openragSearch
+      tags:
+        - openrag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenRAGSearchRequest"
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenRAGSearchResponse"
+
+  /api/v1/chat:
+    post:
+      summary: OpenRAG chat
+      operationId: openragChat
+      tags:
+        - openrag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenRAGChatRequest"
+      responses:
+        "200":
+          description: Chat response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenRAGChatResponse"
+
+  /api/v1/documents/ingest:
+    post:
+      summary: Ingest a document
+      operationId: openragIngest
+      tags:
+        - openrag
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                replace_duplicates:
+                  type: string
+                  default: "true"
+      responses:
+        "200":
+          description: Ingestion task created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IngestResponse"
+
+  /api/v1/tasks/{task_id}:
+    get:
+      summary: Get ingestion task status
+      operationId: openragTaskStatus
+      tags:
+        - openrag
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Task status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskStatus"
+
+  /api/v1/files/get_all:
+    get:
+      summary: List all ingested files
+      operationId: openragListFiles
+      tags:
+        - openrag
+      responses:
+        "200":
+          description: File list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileListResponse"
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  schemas:
+    OpenRAGSearchRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+        filters:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        limit:
+          type: integer
+          default: 10
+        score_threshold:
+          type: number
+          default: 0
+        filter_id:
+          type: string
+          nullable: true
+        rerank:
+          type: boolean
+          default: false
+        rerank_model:
+          type: string
+          nullable: true
+        rerank_top_n:
+          type: integer
+          nullable: true
+
+    OpenRAGSearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenRAGResult"
+
+    OpenRAGResult:
+      type: object
+      properties:
+        filename:
+          type: string
+        text:
+          type: string
+        score:
+          type: number
+        page:
+          type: integer
+          nullable: true
+        mimetype:
+          type: string
+          nullable: true
+
+    OpenRAGChatRequest:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+        stream:
+          type: boolean
+          default: false
+        chat_id:
+          type: string
+          nullable: true
+        filters:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        limit:
+          type: integer
+          default: 10
+        score_threshold:
+          type: number
+          default: 0
+        filter_id:
+          type: string
+          nullable: true
+
+    OpenRAGChatResponse:
+      type: object
+      properties:
+        response:
+          type: string
+        chat_id:
+          type: string
+          nullable: true
+        sources:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenRAGResult"
+
+    IngestResponse:
+      type: object
+      properties:
+        task_id:
+          type: string
+        message:
+          type: string
+        file_count:
+          type: integer
+        filename:
+          type: string
+          nullable: true
+
+    TaskStatus:
+      type: object
+      properties:
+        task_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, completed, failed]
+        total_files:
+          type: integer
+        processed_files:
+          type: integer
+        successful_files:
+          type: integer
+        failed_files:
+          type: integer
+
+    FileListResponse:
+      type: object
+      properties:
+        files:
+          type: array
+          items:
+            $ref: "#/components/schemas/OpenRAGFile"
+        total:
+          type: integer
+
+    OpenRAGFile:
+      type: object
+      properties:
+        filename:
+          type: string
+        document_id:
+          type: string
+        mimetype:
+          type: string
+        chunk_count:
+          type: integer
+        embedding_model:
+          type: string

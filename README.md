@@ -161,3 +161,13 @@ http://localhost:8000
 - Documents
 
 后续会逐步接入知识库管理、评测、对比报告等能力。
+
+## API 契约
+
+接口约定与 OpenAPI 文件：
+
+```text
+docs/api-contract.md              # 前后端 + OpenRAG 外部服务契约说明
+openapi/openrag-lab.yaml          # 自研 FastAPI 后端 OpenAPI
+openapi/openrag.yaml              # OpenRAG Public API 调用子集
+```
