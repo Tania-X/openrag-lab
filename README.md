@@ -41,7 +41,7 @@ uv run openrag-lab eval --csv configs/eval/评测集-questions.csv --top-k 5
 
 ## 已对齐的 OpenRAG API
 
-`client.py` 已经对接 OpenRAG v0.7.0 的公开 v1 API：
+`client.py` 已经对接 OpenRAG v0.7.1 的公开 v1 API：
 
 - `GET /api/health`
 - `POST /api/v1/search`
@@ -161,3 +161,13 @@ http://localhost:8000
 - Documents
 
 后续会逐步接入知识库管理、评测、对比报告等能力。
+
+## API 契约
+
+接口约定与 OpenAPI 文件：
+
+```text
+docs/api-contract.md              # 前后端 + OpenRAG 外部服务契约说明
+openapi/openrag-lab.yaml          # 自研 FastAPI 后端 OpenAPI
+openapi/openrag.yaml              # OpenRAG Public API 调用子集
+```
