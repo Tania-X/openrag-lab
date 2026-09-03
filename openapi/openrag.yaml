@@ -70,6 +70,7 @@ paths:
                 replace_duplicates:
                   type: string
                   default: "true"
+                  description: 是否替换重复文件，传字符串 "true" / "false"。
       responses:
         "200":
           description: Ingestion task created
@@ -129,10 +130,8 @@ components:
           type: string
         filters:
           type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
+          additionalProperties: {}
+          description: 过滤条件，值为任意类型（字符串数组、对象等）。
         limit:
           type: integer
           default: 10
@@ -191,10 +190,8 @@ components:
           nullable: true
         filters:
           type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
+          additionalProperties: {}
+          description: 过滤条件，值为任意类型（字符串数组、对象等）。
         limit:
           type: integer
           default: 10

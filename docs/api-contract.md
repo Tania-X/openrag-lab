@@ -34,7 +34,8 @@ OpenSearch / Langflow / new-api
 }
 ```
 
-- 认证：当前阶段未强制；后续如加入用户体系，统一通过 `Authorization: Bearer <token>`。
+- 认证：自研后端当前阶段未强制认证（本地开发）；后续如加入用户体系，统一通过 `Authorization: Bearer <token>`。
+- 注意：OpenRAG 外部服务认证是独立的一层，必须携带 `X-API-Key`，见第 3 节。
 
 ### 2.2 GET /api/health
 
@@ -211,7 +212,7 @@ OpenRAG 原生 Chat 接口。
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `file` | file | 待入库文件 |
-| `replace_duplicates` | string | 是否替换重复文件，默认 `true` |
+| `replace_duplicates` | string | 是否替换重复文件，传字符串 `"true"` / `"false"`，默认 `"true"` |
 
 响应：
 

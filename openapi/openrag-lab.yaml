@@ -114,10 +114,8 @@ components:
           nullable: true
         filters:
           type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
+          additionalProperties: {}
+          description: 过滤条件，值为任意类型（字符串数组、对象等）。
           example:
             data_sources:
               - "40-2024-支付超时处理规范.md"
@@ -162,10 +160,8 @@ components:
           default: 0
         filters:
           type: object
-          additionalProperties:
-            type: array
-            items:
-              type: string
+          additionalProperties: {}
+          description: 过滤条件，值为任意类型（字符串数组、对象等）。
 
     ChatResponse:
       type: object
