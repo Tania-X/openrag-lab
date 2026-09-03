@@ -234,6 +234,7 @@ OpenRAG 原生 Chat 接口。
   "task_id": "...",
   "status": "completed",
   "total_files": 1,
+  "processed_files": 1,
   "successful_files": 1,
   "failed_files": 0
 }
