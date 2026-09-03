@@ -41,7 +41,7 @@ uv run openrag-lab eval --csv configs/eval/评测集-questions.csv --top-k 5
 
 ## 已对齐的 OpenRAG API
 
-`client.py` 已经对接 OpenRAG v0.7.0 的公开 v1 API：
+`client.py` 已经对接 OpenRAG v0.7.1 的公开 v1 API：
 
 - `GET /api/health`
 - `POST /api/v1/search`

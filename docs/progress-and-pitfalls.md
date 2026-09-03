@@ -1,5 +1,8 @@
 # OpenRAG 探索总结：成果与踩坑记录
 
+> 当前运行基线：OpenRAG v0.7.1（基于 v0.7.1 + 本地补丁）。
+
+
 > 记录我们从 Dify RAG 实践到 OpenRAG 探索的过程、当前成果，以及实际踩过的坑。
 
 ---
@@ -23,7 +26,7 @@
 
 ### 2. OpenRAG 探索阶段
 
-- 完成 OpenRAG v0.7.0 源码构建：
+- 完成 OpenRAG v0.7.1 源码构建：
   - openrag-backend
   - openrag-frontend
   - openrag-langflow
@@ -53,7 +56,7 @@
   - `latest` Langflow 镜像里的 `lfx` 版本较旧
   - OpenRAG 最新 flow 依赖新版 `lfx`
 - 解决：
-  - 固定到 `v0.7.0`
+  - 固定到当时的 `v0.7.0`（后续已升级到 v0.7.1）
   - 从源码重新构建匹配镜像
 
 ### 2. Docker Hub 直连超时
@@ -80,7 +83,7 @@
   - Langflow 报缺少 `DEEPSEEK_API_KEY` / `SILICONFLOW_API_KEY`
   - 继续修复后报 `No embedding class defined for BAAI/bge-m3 (provider: siliconflow)`
 - 原因：
-  - OpenRAG v0.7.0 的 Langflow flow 对自定义 provider 没有完整的 class mapping
+  - 当时的 OpenRAG v0.7.0 Langflow flow 对自定义 provider 没有完整的 class mapping
   - 不是塞 Key 就能解决的
 - 解决：
   - 采用本地 `new-api` 网关
