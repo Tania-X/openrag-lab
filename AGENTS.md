@@ -8,11 +8,12 @@ These rules apply to any coding agent working in this repository.
 - Always develop on a `feat/*` branch and open a Pull Request.
 - Never delete `feat/*` branches after merging.
 - Merge Pull Requests with a regular merge commit, never squash.
-- Follow the `ai-review-loop` collaboration skill:
+- Follow the `pr-ai-review-loop` skill from the skills-hub repository:
+  - https://github.com/Tania-X/skills-hub
+  - skill path: `skills/pr-ai-review-loop/SKILL.md`
   - If AI Review reports severity >= 4, fix and push, then monitor again.
   - If severity < 4, stop and ask the human for a decision.
 
-## Memory / Docs
+## Docs
 
-- Persistent assistant memory: `/Users/apple/dsh/.ai-memory.md`
-- Collaboration skill: `/Users/apple/dsh/skills/ai-review-loop.md`
+- Project progress and pitfalls: `docs/progress-and-pitfalls.md`

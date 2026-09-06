@@ -7,11 +7,12 @@
 - 功能开发必须走 feature 分支，禁止直接 push 到 main。
 - feature 分支合并后**永不删除**，保留完整历史。
 - 合并 PR 使用普通 merge，**不要 squash merge**。
-- AI Review 流程遵循 `ai-review-loop`：
+- AI Review 流程遵循 `pr-ai-review-loop` skill：
   - severity >= 4：自动修复 → push → 继续监听。
   - severity < 4：停下，分析并交给人决策。
 
 ## 参考
 
-- 本地 skill：`/Users/apple/dsh/skills/ai-review-loop.md`
+- skill 仓库：https://github.com/Tania-X/skills-hub
+- skill 路径：`skills/pr-ai-review-loop/SKILL.md`
 - 项目文档：`docs/progress-and-pitfalls.md`
