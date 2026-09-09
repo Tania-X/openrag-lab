@@ -257,16 +257,19 @@ RbacService
 POST /api/auth/register
 body: { username, password, display_name?, tenant_name? }
 
-1. 创建该用户自己的租户（如未指定，slug 由 username 生成）
-2. 创建 User
-3. 分配 tenant_admin 角色
-4. 返回 JWT
+1. 创建该用户自己的新租户（tenant_name 只用于命名新租户；如未指定，slug 由 username 生成）
+2. 如果同名/同 slug 租户已存在，则拒绝注册，防止加入已有租户并越权获得 tenant_admin
+3. 创建 User
+4. 分配 tenant_admin 角色
+5. 返回 JWT
 ```
 
 说明：
 
 - 注册 = 自助开通自己的工作区
 - 每个注册用户自动成为自己租户的 tenant_admin
+- Phase 1 注册不能通过 tenant_name 加入已有租户
+- 加入已有租户必须走管理员创建用户接口（需 `users:write` 权限）
 - bootstrap 的 `default` 租户只用于本地超管引导，与用户自动创建的租户相互独立
 
 ### 9.2 登录
@@ -315,9 +318,11 @@ require_permission("users:write")
 
 ```text
 1. 从 JWT 解析 user_id + tenant_id
-2. 加载该租户下用户角色
-3. 汇总权限
-4. 无权限 → 403
+2. 加载 user_global_roles
+   - 若包含 super_admin → 直接放行（跨租户全部权限）
+3. 否则加载该租户下用户角色
+4. 汇总租户权限
+5. 无权限 → 403
 ```
 
 ---
