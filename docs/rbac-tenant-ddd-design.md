@@ -26,7 +26,7 @@ OpenRAG 本身有 RBAC/用户/API Key 能力，但在我们的架构里它定位
 
 - 支持用户名 + 密码 + JWT 登录
 - 支持用户注册 + 管理员创建用户两种途径
-- 内置角色：`admin / developer / user / viewer`
+- 内置角色：`tenant_admin / developer / user / viewer`
 - 支持 API 级 RBAC 拦截
 - 支持租户级逻辑隔离
 - 使用 DDD 分层，为后续扩展多平台、多工具、OAuth 等留下清晰边界
@@ -138,8 +138,9 @@ Permission
 ### 6.2 核心关系
 
 ```text
-Tenant 1 ── * TenantUser * ── 1 User
-Tenant 1 ── * TenantUserRole * ── 1 Role
+Tenant 1 ── * User（User.tenant_id）
+Tenant 1 ── * TenantUserRole * ── 1 User
+TenantUserRole * ── 1 Role
 Role 1 ── * RolePermission * ── 1 Permission
 
 User 1 ── * UserGlobalRole * ── 1 GlobalRole
@@ -430,7 +431,7 @@ updated_at
 
 ```text
 id
-name              # admin / developer / user / viewer
+name              # tenant_admin / developer / user / viewer
 description
 is_system
 ```
