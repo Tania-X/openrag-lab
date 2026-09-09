@@ -45,6 +45,6 @@ async def create_all() -> None:
 
 async def get_session() -> AsyncIterator[AsyncSession]:
     engine = init_db()
-    factory = async_sessionmaker(engine, expire_on_commit=False)
+    factory = _session_factory or async_sessionmaker(engine, expire_on_commit=False)
     async with factory() as session:
         yield session

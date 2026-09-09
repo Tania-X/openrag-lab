@@ -29,14 +29,21 @@ from openrag_lab.infrastructure.db.models.identity import (
 )
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """SQLite does not preserve tzinfo; treat naive DB timestamps as UTC."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
+
+
 def _tenant_to_domain(model: TenantModel) -> Tenant:
     return Tenant(
         id=TenantId(model.id),
         name=model.name,
         slug=model.slug,
         status=TenantStatus(model.status),
-        created_at=model.created_at,
-        updated_at=model.updated_at,
+        created_at=_ensure_utc(model.created_at),
+        updated_at=_ensure_utc(model.updated_at),
     )
 
 
@@ -59,8 +66,8 @@ def _user_to_domain(model: UserModel) -> User:
         password_hash=model.password_hash,
         display_name=model.display_name,
         status=UserStatus(model.status),
-        created_at=model.created_at,
-        updated_at=model.updated_at,
+        created_at=_ensure_utc(model.created_at),
+        updated_at=_ensure_utc(model.updated_at),
     )
 
 
@@ -121,6 +128,17 @@ def _permission_to_domain(model: PermissionModel) -> Permission:
         resource=model.resource,
         action=model.action,
     )
+
+
+async def _resolve_permission_models(
+    session: AsyncSession, names: set[str]
+) -> list[PermissionModel]:
+    if not names:
+        return []
+    result = await session.execute(
+        select(PermissionModel).where(PermissionModel.name.in_(names))
+    )
+    return list(result.scalars().all())
 
 
 class SqlTenantRepository:
@@ -214,12 +232,16 @@ class SqlRoleRepository:
 
     async def save(self, role: Role) -> None:
         model = await self._session.get(RoleModel, role.id.value)
+        permissions = await _resolve_permission_models(self._session, role.permissions)
         if model is None:
-            self._session.add(_role_to_model(role))
+            model = _role_to_model(role)
+            model.permissions = permissions
+            self._session.add(model)
         else:
             model.name = role.name
             model.description = role.description
             model.is_system = role.is_system
+            model.permissions = permissions
 
 
 class SqlGlobalRoleRepository:
@@ -245,12 +267,16 @@ class SqlGlobalRoleRepository:
 
     async def save(self, role: GlobalRole) -> None:
         model = await self._session.get(GlobalRoleModel, role.id.value)
+        permissions = await _resolve_permission_models(self._session, role.permissions)
         if model is None:
-            self._session.add(_global_role_to_model(role))
+            model = _global_role_to_model(role)
+            model.permissions = permissions
+            self._session.add(model)
         else:
             model.name = role.name
             model.description = role.description
             model.is_system = role.is_system
+            model.permissions = permissions
 
 
 class SqlPermissionRepository:
