@@ -31,6 +31,7 @@ def init_db(database_url: str | None = None) -> AsyncEngine:
         return _engine
 
     url = database_url or _default_database_url()
+    DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     _engine = create_async_engine(url, echo=False)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
