@@ -257,11 +257,17 @@ RbacService
 POST /api/auth/register
 body: { username, password, display_name?, tenant_name? }
 
-1. 创建默认租户（如未指定，slug 由 username 生成）
+1. 创建该用户自己的租户（如未指定，slug 由 username 生成）
 2. 创建 User
-3. 分配 user 角色
+3. 分配 tenant_admin 角色
 4. 返回 JWT
 ```
+
+说明：
+
+- 注册 = 自助开通自己的工作区
+- 每个注册用户自动成为自己租户的 tenant_admin
+- bootstrap 的 `default` 租户只用于本地超管引导，与用户自动创建的租户相互独立
 
 ### 9.2 登录
 
@@ -487,11 +493,17 @@ global_role_id
 2. 创建全局角色 super_admin
 3. 创建租户角色 tenant_admin / developer / user / viewer
 4. 如果没有任何用户：
-   创建 default 租户
+   创建 default 租户（仅本地引导用）
    创建 admin / admin123
    分配 global_role: super_admin
    分配 tenant_role: tenant_admin
 ```
+
+安全说明：
+
+- `admin/admin123` 仅用于本地开发环境引导
+- 生产环境管理员口令必须从环境变量读取，不写入种子数据
+- 后续增加“首次登录强制改密”
 
 ---
 
@@ -651,7 +663,7 @@ class Tenant:
 
 ## 18. 待确认/开放问题
 
-- OpenRAG 文档入库时如何统一打 `tenant owner` 标签？
+- 如何为每个租户创建和管理独立的 OpenRAG API Key / 服务账号？（实现细节，不影响领域模型）
 - 是否允许一个租户下多个角色叠加？
 - 管理员能否跨租户管理？
 - 后续是否需要“邀请码 / 邮箱验证”？
