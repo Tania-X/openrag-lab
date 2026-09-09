@@ -77,6 +77,12 @@ Application 依赖 Domain 接口 + Infrastructure 实现
 Interface 只依赖 Application
 ```
 
+ORM 策略：
+
+- Domain 使用纯 Python 类 / dataclass
+- SQLAlchemy 只存在于 Infrastructure Repository 中
+- Domain 不 import SQLAlchemy / FastAPI / Pydantic
+
 ---
 
 ## 5. 限界上下文
@@ -135,6 +141,8 @@ Permission
 Tenant 1 ── * TenantUser * ── 1 User
 Tenant 1 ── * TenantUserRole * ── 1 Role
 Role 1 ── * RolePermission * ── 1 Permission
+
+User 1 ── * UserGlobalRole * ── 1 GlobalRole
 ```
 
 一个用户只属于一个租户（Phase 1）：
@@ -143,7 +151,15 @@ Role 1 ── * RolePermission * ── 1 Permission
 User.tenant_id
 ```
 
-后续如需多租户，再升级为 `tenant_memberships`。
+Phase 1 内，一个用户在一个租户中只分配一个角色；
+但 `tenant_user_roles` 表仍按多对多设计，后续放开限制不需要改表。
+
+全局角色与租户角色分离：
+
+```text
+GlobalRole: super_admin
+TenantRole: tenant_admin / developer / user / viewer
+```
 
 ### 6.3 值对象
 
@@ -156,6 +172,8 @@ PasswordHash
 PermissionName
 TenantStatus
 UserStatus
+GlobalRoleName
+TenantRoleName
 ```
 
 ### 6.4 领域不变量
@@ -164,7 +182,8 @@ UserStatus
 - 密码必须哈希后存储
 - 租户 slug 唯一
 - 同一租户内不能重复分配同一角色给同一用户
-- admin 角色拥有全部权限
+- super_admin 全局角色拥有跨租户管理权限
+- tenant_admin 仅拥有当前租户管理权限
 - 系统内置角色不可删除（Phase 1 可先不允许删除任何角色）
 
 ---
@@ -196,6 +215,10 @@ class TenantUserRoleRepository(Protocol):
     async def assign_role(
         self, tenant_id: TenantId, user_id: UserId, role_id: RoleId
     ) -> None: ...
+
+class UserGlobalRoleRepository(Protocol):
+    async def global_roles_of_user(self, user_id: UserId) -> list[GlobalRole]: ...
+    async def assign_global_role(self, user_id: UserId, role_id: GlobalRoleId) -> None: ...
 ```
 
 ---
@@ -312,9 +335,17 @@ tenants:write
 
 内置角色：
 
+全局角色：
+
 | 角色 | 权限 |
 |---|---|
-| admin | 全部 |
+| super_admin | 跨租户全部权限 |
+
+租户角色：
+
+| 角色 | 权限 |
+|---|---|
+| tenant_admin | 本租户全部权限 |
 | developer | documents:upload/read/delete、chat/search、users:read |
 | user | chat/search、documents:read、documents:upload |
 | viewer | chat/search、documents:read |
@@ -329,22 +360,26 @@ Phase 1 采用 **逻辑独立**：
 
 ```text
 物理上共用一套 OpenRAG
-每个租户拥有独立 owner / 服务账号 / API Key 映射
+每个租户拥有独立的 OpenRAG API Key / 服务账号
 ```
 
 具体：
 
 - 每个租户在 openrag-lab 中有唯一 `tenant_id`
-- 上传到 OpenRAG 的文档 `owner = f"tenant:{tenant_id}"`
-- 每次调用 OpenRAG Search/Chat 时自动注入：
+- 每个租户对应一个独立的 OpenRAG API Key / 服务账号
+- 使用该租户自己的 API Key 上传文档，OpenRAG 记录的 `owner` 天然归属该租户
+- 调用 OpenRAG Search/Chat 时使用该租户自己的 API Key，并自动注入：
 
 ```json
 {
   "filters": {
-    "owners": ["tenant:<tenant_id>"]
+    "owners": ["<tenant-owner-id>"]
   }
 }
 ```
+
+`owner` 的取值由租户对应的 OpenRAG 服务账号决定，不依赖自定义 metadata。
+自定义 metadata（如 `tenant_id`）仅用于展示/审计，不作为检索隔离条件。
 
 ### 11.2 为什么不用 data_sources 做租户隔离
 
@@ -424,6 +459,22 @@ user_id
 role_id
 ```
 
+### global_roles
+
+```text
+id
+name              # super_admin
+description
+is_system
+```
+
+### user_global_roles
+
+```text
+user_id
+global_role_id
+```
+
 ---
 
 ## 13. 启动种子数据
@@ -432,11 +483,13 @@ role_id
 
 ```text
 1. 创建权限目录
-2. 创建内置角色
-3. 如果没有任何用户：
+2. 创建全局角色 super_admin
+3. 创建租户角色 tenant_admin / developer / user / viewer
+4. 如果没有任何用户：
    创建 default 租户
    创建 admin / admin123
-   分配 admin 角色
+   分配 global_role: super_admin
+   分配 tenant_role: tenant_admin
 ```
 
 ---
@@ -519,9 +572,9 @@ src/openrag_lab/
 │       └── search_service.py
 ├── infrastructure/
 │   ├── db/
-│   │   ├── models/
+│   │   ├── models/          # users / tenants / roles / permissions / global_roles ...
 │   │   ├── session.py
-│   │   └── repositories/
+│   │   └── repositories/    # SQLAlchemy Repository 实现
 │   ├── security/
 │   │   ├── jwt.py
 │   │   └── password.py
