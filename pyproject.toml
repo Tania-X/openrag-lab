@@ -11,7 +11,9 @@ dependencies = [
     "pydantic-settings>=2.4",
     "python-dotenv>=1.0",
     "python-multipart>=0.0.9",
+    "aiosqlite>=0.20",
     "rich>=13.7",
+    "sqlalchemy[asyncio]>=2.0",
     "typer>=0.12",
     "uvicorn[standard]>=0.30",
 ]
