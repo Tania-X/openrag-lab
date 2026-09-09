@@ -18,8 +18,12 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy import (
+    Enum as SAEnum,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.infrastructure.db.base import Base
 
 role_permissions = Table(
@@ -77,7 +81,10 @@ class TenantModel(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     slug: Mapped[str] = mapped_column(String(128), index=True)
-    status: Mapped[str] = mapped_column(String(32), default="active")
+    status: Mapped[TenantStatus] = mapped_column(
+        SAEnum(TenantStatus, native_enum=False, validate_strings=True, length=32),
+        default=TenantStatus.ACTIVE,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
@@ -95,7 +102,10 @@ class UserModel(Base):
     username: Mapped[str] = mapped_column(String(255), index=True)
     password_hash: Mapped[str] = mapped_column(String(512))
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), default="active")
+    status: Mapped[UserStatus] = mapped_column(
+        SAEnum(UserStatus, native_enum=False, validate_strings=True, length=32),
+        default=UserStatus.ACTIVE,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

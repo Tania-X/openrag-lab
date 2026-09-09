@@ -36,12 +36,24 @@ def _ensure_utc(dt: datetime) -> datetime:
     return dt.astimezone(UTC)
 
 
+def _coerce_tenant_status(value: TenantStatus | str) -> TenantStatus:
+    if isinstance(value, TenantStatus):
+        return value
+    return TenantStatus(value)
+
+
+def _coerce_user_status(value: UserStatus | str) -> UserStatus:
+    if isinstance(value, UserStatus):
+        return value
+    return UserStatus(value)
+
+
 def _tenant_to_domain(model: TenantModel) -> Tenant:
     return Tenant(
         id=TenantId(model.id),
         name=model.name,
         slug=model.slug,
-        status=TenantStatus(model.status),
+        status=_coerce_tenant_status(model.status),
         created_at=_ensure_utc(model.created_at),
         updated_at=_ensure_utc(model.updated_at),
     )
@@ -65,7 +77,7 @@ def _user_to_domain(model: UserModel) -> User:
         username=model.username,
         password_hash=model.password_hash,
         display_name=model.display_name,
-        status=UserStatus(model.status),
+        status=_coerce_user_status(model.status),
         created_at=_ensure_utc(model.created_at),
         updated_at=_ensure_utc(model.updated_at),
     )
@@ -233,6 +245,9 @@ class SqlRoleRepository:
     async def save(self, role: Role) -> None:
         model = await self._session.get(RoleModel, role.id.value)
         permissions = await _resolve_permission_models(self._session, role.permissions)
+        missing = role.permissions - {p.name for p in permissions}
+        if missing:
+            raise ValueError(f"Unknown permissions for role {role.name}: {sorted(missing)}")
         if model is None:
             model = _role_to_model(role)
             model.permissions = permissions
@@ -268,6 +283,11 @@ class SqlGlobalRoleRepository:
     async def save(self, role: GlobalRole) -> None:
         model = await self._session.get(GlobalRoleModel, role.id.value)
         permissions = await _resolve_permission_models(self._session, role.permissions)
+        missing = role.permissions - {p.name for p in permissions}
+        if missing:
+            raise ValueError(
+                f"Unknown permissions for global role {role.name}: {sorted(missing)}"
+            )
         if model is None:
             model = _global_role_to_model(role)
             model.permissions = permissions
@@ -319,6 +339,15 @@ class SqlTenantUserRoleRepository:
     async def assign_role(self, role: TenantUserRole) -> None:
         from openrag_lab.infrastructure.db.models.identity import tenant_user_roles as table
 
+        existing = await self._session.execute(
+            select(table).where(
+                table.c.tenant_id == role.tenant_id.value,
+                table.c.user_id == role.user_id.value,
+                table.c.role_id == role.role_id.value,
+            )
+        )
+        if existing.first() is not None:
+            return
         await self._session.execute(
             table.insert().values(
                 tenant_id=role.tenant_id.value,
@@ -360,6 +389,14 @@ class SqlUserGlobalRoleRepository:
     async def assign_global_role(self, role: UserGlobalRole) -> None:
         from openrag_lab.infrastructure.db.models.identity import user_global_roles as table
 
+        existing = await self._session.execute(
+            select(table).where(
+                table.c.user_id == role.user_id.value,
+                table.c.global_role_id == role.global_role_id.value,
+            )
+        )
+        if existing.first() is not None:
+            return
         await self._session.execute(
             table.insert().values(
                 user_id=role.user_id.value,

@@ -36,6 +36,13 @@ def init_db(database_url: str | None = None) -> AsyncEngine:
     return _engine
 
 
+def reset_db() -> None:
+    """Reset cached engine/session factory (mainly for tests)."""
+    global _engine, _session_factory
+    _engine = None
+    _session_factory = None
+
+
 async def create_all() -> None:
     """Create all tables (simple bootstrap; Alembic comes later)."""
     engine = init_db()
@@ -44,7 +51,7 @@ async def create_all() -> None:
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    engine = init_db()
-    factory = _session_factory or async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as session:
+    init_db()
+    assert _session_factory is not None
+    async with _session_factory() as session:
         yield session

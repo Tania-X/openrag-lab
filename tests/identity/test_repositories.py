@@ -1,5 +1,6 @@
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import StaticPool
 
 from openrag_lab.domain.identity.models import Tenant, TenantUserRole, User
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
@@ -18,7 +19,11 @@ from openrag_lab.infrastructure.db.seed import seed_identity
 
 @pytest.mark.asyncio
 async def test_seed_and_repositories() -> None:
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

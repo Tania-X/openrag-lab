@@ -1,6 +1,13 @@
-"""Idempotent seed data for identity and access."""
+"""Idempotent seed data for identity and access.
+
+Note: the seed is protected by an in-process asyncio lock so concurrent
+startups inside the same process do not race. Multi-process bootstrap should
+serialize seed execution externally.
+"""
 
 from __future__ import annotations
+
+import asyncio
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,6 +17,8 @@ from openrag_lab.infrastructure.db.models.identity import (
     PermissionModel,
     RoleModel,
 )
+
+_seed_lock = asyncio.Lock()
 
 # (resource, action)
 PERMISSION_CATALOG: list[tuple[str, str]] = [
@@ -82,6 +91,15 @@ def _permission_name(resource: str, action: str) -> str:
 
 
 async def seed_identity(session: AsyncSession) -> None:
+    """Insert permissions and built-in roles if they do not exist.
+
+    This wrapper serializes seeding with an in-process asyncio lock.
+    """
+    async with _seed_lock:
+        await _seed_identity_locked(session)
+
+
+async def _seed_identity_locked(session: AsyncSession) -> None:
     """Insert permissions and built-in roles if they do not exist."""
 
     # Permissions
