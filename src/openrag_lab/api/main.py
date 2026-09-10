@@ -6,11 +6,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from openrag_lab.api.routers import chat, documents, health, search
 from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.config import get_settings
+from openrag_lab.domain.shared.errors import DomainError, NotFoundError
 from openrag_lab.infrastructure.db.seed import seed_identity
 from openrag_lab.infrastructure.db.session import create_all, init_db, reset_db
 from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
@@ -52,6 +54,16 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OpenRAG Lab API", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(NotFoundError)
+async def _not_found_handler(request, exc: NotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(DomainError)
+async def _domain_error_handler(request, exc: DomainError) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 app.add_middleware(
     CORSMiddleware,

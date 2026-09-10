@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import secrets
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
@@ -57,12 +58,12 @@ class AuthService:
         tenant_name = tenant_name or username
         base_slug = slugify(tenant_name)
         tenant_slug = base_slug
-        for _ in range(5):
+        for _ in range(10):
             if await self._tenant_service.get_tenant_by_slug(tenant_slug) is None:
                 break
-            tenant_slug = f"{base_slug}-{secrets.token_hex(3)}"
+            tenant_slug = f"{base_slug}-{secrets.token_hex(6)}"
         else:
-            raise AlreadyExistsError(
+            raise InvalidOperationError(
                 f"Could not allocate a unique tenant slug for: {tenant_name}"
             )
 
@@ -125,36 +126,40 @@ class AuthService:
         if existing is not None:
             return
 
-        tenant = await self._tenant_service.get_tenant_by_slug("default")
-        if tenant is None:
-            tenant = await self._tenant_service.create_tenant("Default", "default")
+        try:
+            tenant = await self._tenant_service.get_tenant_by_slug("default")
+            if tenant is None:
+                tenant = await self._tenant_service.create_tenant("Default", "default")
 
-        user = User(
-            id=UserId.generate(),
-            tenant_id=tenant.id,
-            username=settings.bootstrap_admin_username,
-            password_hash=hash_password(settings.bootstrap_admin_password),
-            display_name="Bootstrap Admin",
-        )
-        await self._user_repo.save(user)
+            user = User(
+                id=UserId.generate(),
+                tenant_id=tenant.id,
+                username=settings.bootstrap_admin_username,
+                password_hash=hash_password(settings.bootstrap_admin_password),
+                display_name="Bootstrap Admin",
+            )
+            await self._user_repo.save(user)
 
-        tenant_admin_role = await self._role_repo.find_by_name(TenantRoleName.TENANT_ADMIN)
-        if tenant_admin_role is not None:
-            await self._tenant_user_role_repo.assign_role(
-                TenantUserRole(
-                    tenant_id=tenant.id,
-                    user_id=user.id,
-                    role_id=tenant_admin_role.id,
+            tenant_admin_role = await self._role_repo.find_by_name(TenantRoleName.TENANT_ADMIN)
+            if tenant_admin_role is not None:
+                await self._tenant_user_role_repo.assign_role(
+                    TenantUserRole(
+                        tenant_id=tenant.id,
+                        user_id=user.id,
+                        role_id=tenant_admin_role.id,
+                    )
                 )
-            )
 
-        super_admin_role = await self._global_role_repo.find_by_name(GlobalRoleName.SUPER_ADMIN)
-        if super_admin_role is not None:
-            await self._user_global_role_repo.assign_global_role(
-                UserGlobalRole(user_id=user.id, global_role_id=super_admin_role.id)
-            )
+            super_admin_role = await self._global_role_repo.find_by_name(GlobalRoleName.SUPER_ADMIN)
+            if super_admin_role is not None:
+                await self._user_global_role_repo.assign_global_role(
+                    UserGlobalRole(user_id=user.id, global_role_id=super_admin_role.id)
+                )
 
-        await self._session.commit()
+            await self._session.commit()
+        except IntegrityError:
+            # Concurrent bootstrap race: another worker created the admin first.
+            await self._session.rollback()
 
     def _token_response(self, user: User) -> dict:
         token = create_access_token(

@@ -12,7 +12,7 @@ class CreateUserRequest(BaseModel):
 
     username: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=8, max_length=255)
-    role_name: TenantRoleName = Field(default=TenantRoleName.USER, alias="role")
+    role: TenantRoleName = TenantRoleName.USER
     display_name: str | None = None
     tenant_id: str | None = None
 

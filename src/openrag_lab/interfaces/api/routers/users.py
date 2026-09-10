@@ -45,6 +45,12 @@ async def create_user(
     actor: Annotated[CurrentUser, Depends(require_permission("users:write"))],
 ) -> UserResponse:
     target_tenant_id = body.tenant_id or actor.tenant_id
+    tenant = await TenantService(session).get_tenant(TenantId(target_tenant_id))
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if tenant.status is not TenantStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Tenant is not active")
+
     if target_tenant_id != actor.tenant_id:
         rbac = RbacService(session)
         if not await rbac.is_super_admin(actor.user_id):
@@ -53,19 +59,13 @@ async def create_user(
         # (including tenant_admin) in any tenant. Tenant admins are limited to
         # their own tenant by the check above.
 
-    tenant = await TenantService(session).get_tenant(TenantId(target_tenant_id))
-    if tenant is None:
-        raise HTTPException(status_code=404, detail="Tenant not found")
-    if tenant.status is not TenantStatus.ACTIVE:
-        raise HTTPException(status_code=400, detail="Tenant is not active")
-
     service = UserService(session)
     try:
         user = await service.create_user(
             username=body.username,
             password=body.password,
             tenant_id=target_tenant_id,
-            role_name=body.role_name,
+            role_name=body.role,
             display_name=body.display_name,
         )
         await session.commit()

@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import secrets
 
-_ITERATIONS = 100_000
+_ITERATIONS = 600_000
 _ALGORITHM = "pbkdf2_sha256"
 
 

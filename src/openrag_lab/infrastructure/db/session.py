@@ -55,7 +55,9 @@ async def create_all() -> None:
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
-    init_db()
+    from openrag_lab.config import get_settings
+
+    init_db(get_settings().database_url)
     assert _session_factory is not None
     async with _session_factory() as session:
         yield session

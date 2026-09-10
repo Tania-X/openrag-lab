@@ -36,7 +36,7 @@ async def test_register_login_and_admin_create_user() -> None:
             settings.bootstrap_admin_username,
             settings.bootstrap_admin_password,
         )
-        assert token["username"] == "admin"
+        assert token["username"] == settings.bootstrap_admin_username
         admin_me = await service.me(token["user_id"], token["tenant_id"])
         assert "tenants:write" in admin_me["permissions"]
 
