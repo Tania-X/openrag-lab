@@ -7,8 +7,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 
 from openrag_lab.application.identity.rbac_service import RbacService
+from openrag_lab.application.identity.tenant_service import TenantService
 from openrag_lab.application.identity.user_service import UserService
+from openrag_lab.domain.shared.enums import TenantStatus
 from openrag_lab.domain.shared.errors import DomainError
+from openrag_lab.domain.shared.ids import TenantId
 from openrag_lab.interfaces.api.deps import CurrentUser, DbSession, require_permission
 from openrag_lab.interfaces.schemas.user import CreateUserRequest, UserResponse
 
@@ -47,6 +50,12 @@ async def create_user(
         if not await rbac.is_super_admin(actor.user_id):
             raise HTTPException(status_code=403, detail="permission_denied")
 
+    tenant = await TenantService(session).get_tenant(TenantId(target_tenant_id))
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    if tenant.status is not TenantStatus.ACTIVE:
+        raise HTTPException(status_code=400, detail="Tenant is not active")
+
     service = UserService(session)
     try:
         user = await service.create_user(
@@ -57,7 +66,7 @@ async def create_user(
             display_name=body.display_name,
         )
         await session.commit()
-    except DomainError as exc:
+    except (DomainError, ValueError) as exc:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(user)

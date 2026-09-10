@@ -37,6 +37,8 @@ async def test_register_login_and_admin_create_user() -> None:
             settings.bootstrap_admin_password,
         )
         assert token["username"] == "admin"
+        admin_me = await service.me(token["user_id"], token["tenant_id"])
+        assert "tenants:write" in admin_me["permissions"]
 
     async with session_factory() as session:
         service = AuthService(session)
@@ -46,8 +48,11 @@ async def test_register_login_and_admin_create_user() -> None:
 
     async with session_factory() as session:
         service = AuthService(session)
-        me = await service.me(result["user_id"])
-        assert TENANT_ROLES["tenant_admin"] <= set(me["permissions"])
+        me = await service.me(result["user_id"], result["tenant_id"])
+        permissions = set(me["permissions"])
+        assert "users:write" in permissions
+        assert "tenants:write" not in permissions
+        assert TENANT_ROLES[TenantRoleName.TENANT_ADMIN] <= permissions
 
     async with session_factory() as session:
         service = UserService(session)

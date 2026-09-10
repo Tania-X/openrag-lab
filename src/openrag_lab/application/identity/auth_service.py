@@ -53,12 +53,10 @@ class AuthService:
             raise AlreadyExistsError(f"Username already exists: {username}")
 
         tenant_name = tenant_name or username
-        tenant_slug = slugify(tenant_name)
-        existing_tenant = await self._tenant_service.get_tenant_by_slug(tenant_slug)
-        if existing_tenant is not None:
-            # Different usernames can produce the same slug (case/space folding).
-            # Auto-suffix instead of blocking self-service registration.
-            tenant_slug = f"{tenant_slug}-{secrets.token_hex(3)}"
+        base_slug = slugify(tenant_name)
+        tenant_slug = base_slug
+        while await self._tenant_service.get_tenant_by_slug(tenant_slug) is not None:
+            tenant_slug = f"{base_slug}-{secrets.token_hex(3)}"
 
         tenant = await self._tenant_service.create_tenant(tenant_name, tenant_slug)
         user = User(
@@ -92,11 +90,11 @@ class AuthService:
             raise InvalidOperationError("User is disabled")
         return self._token_response(user)
 
-    async def me(self, user_id: str) -> dict:
+    async def me(self, user_id: str, tenant_id: str) -> dict:
         user = await self._user_repo.find_by_id(UserId(user_id))
         if user is None:
             raise NotFoundError("User not found")
-        permissions = await self._rbac.effective_permissions(user.id.value, user.tenant_id.value)
+        permissions = await self._rbac.effective_permissions(user.id.value, tenant_id)
         return {
             "user_id": user.id.value,
             "tenant_id": user.tenant_id.value,

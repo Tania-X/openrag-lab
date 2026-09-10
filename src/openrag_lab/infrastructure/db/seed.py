@@ -12,6 +12,7 @@ import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from openrag_lab.domain.shared.enums import GlobalRoleName, TenantRoleName
 from openrag_lab.infrastructure.db.models.identity import (
     GlobalRoleModel,
     PermissionModel,
@@ -35,8 +36,8 @@ PERMISSION_CATALOG: list[tuple[str, str]] = [
     ("tenants", "write"),
 ]
 
-TENANT_ROLES: dict[str, set[str]] = {
-    "tenant_admin": {
+TENANT_ROLES: dict[TenantRoleName, set[str]] = {
+    TenantRoleName.TENANT_ADMIN: {
         "chat:use",
         "search:use",
         "documents:read",
@@ -48,7 +49,7 @@ TENANT_ROLES: dict[str, set[str]] = {
         "roles:write",
         "tenants:read",
     },
-    "developer": {
+    TenantRoleName.DEVELOPER: {
         "chat:use",
         "search:use",
         "documents:read",
@@ -56,21 +57,21 @@ TENANT_ROLES: dict[str, set[str]] = {
         "documents:delete",
         "users:read",
     },
-    "user": {
+    TenantRoleName.USER: {
         "chat:use",
         "search:use",
         "documents:read",
         "documents:upload",
     },
-    "viewer": {
+    TenantRoleName.VIEWER: {
         "chat:use",
         "search:use",
         "documents:read",
     },
 }
 
-GLOBAL_ROLES: dict[str, set[str]] = {
-    "super_admin": {
+GLOBAL_ROLES: dict[GlobalRoleName, set[str]] = {
+    GlobalRoleName.SUPER_ADMIN: {
         "chat:use",
         "search:use",
         "documents:read",
@@ -127,40 +128,42 @@ async def _seed_identity_locked(session: AsyncSession) -> None:
 
     # Tenant roles
     existing_role_names = set((await session.scalars(select(RoleModel.name))).all())
-    role_models: dict[str, RoleModel] = {}
-    for name, permission_names in TENANT_ROLES.items():
-        if name not in existing_role_names:
+    role_models: dict[TenantRoleName, RoleModel] = {}
+    for role_name, permission_names in TENANT_ROLES.items():
+        name_value = role_name.value
+        if name_value not in existing_role_names:
             role = RoleModel(
-                id=f"role-{name}",
-                name=name,
-                description=f"Built-in tenant role: {name}",
+                id=f"role-{name_value}",
+                name=name_value,
+                description=f"Built-in tenant role: {name_value}",
                 is_system=True,
             )
             session.add(role)
-            role_models[name] = role
+            role_models[role_name] = role
         else:
-            role_models[name] = (
-                await session.scalars(select(RoleModel).where(RoleModel.name == name))
+            role_models[role_name] = (
+                await session.scalars(select(RoleModel).where(RoleModel.name == name_value))
             ).one()
-        role_models[name].permissions = [
+        role_models[role_name].permissions = [
             permission_by_name[p] for p in permission_names if p in permission_by_name
         ]
 
     # Global roles
     existing_global_names = set((await session.scalars(select(GlobalRoleModel.name))).all())
-    for name, permission_names in GLOBAL_ROLES.items():
-        if name not in existing_global_names:
+    for role_name, permission_names in GLOBAL_ROLES.items():
+        name_value = role_name.value
+        if name_value not in existing_global_names:
             role = GlobalRoleModel(
-                id=f"global-role-{name}",
-                name=name,
-                description=f"Built-in global role: {name}",
+                id=f"global-role-{name_value}",
+                name=name_value,
+                description=f"Built-in global role: {name_value}",
                 is_system=True,
             )
             session.add(role)
         else:
             role = (
                 await session.scalars(
-                    select(GlobalRoleModel).where(GlobalRoleModel.name == name)
+                    select(GlobalRoleModel).where(GlobalRoleModel.name == name_value)
                 )
             ).one()
         role.permissions = [

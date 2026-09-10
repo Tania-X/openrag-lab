@@ -20,9 +20,19 @@ from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
 async def lifespan(app: FastAPI):
     settings = get_settings()
     if settings.app_env.lower() == "production":
-        if settings.jwt_secret.startswith("dev-secret") or settings.bootstrap_admin_password == "admin123":
+        insecure_secrets = {
+            "dev-secret-change-me-please-override-in-production",
+            "change-me-in-production",
+        }
+        if settings.jwt_secret in insecure_secrets or len(settings.jwt_secret) < 32:
             raise RuntimeError(
-                "Refusing to start in production with default JWT secret or bootstrap admin password"
+                "Refusing to start in production with a default or short JWT secret"
+            )
+        if settings.bootstrap_admin_password == "admin123" or len(
+            settings.bootstrap_admin_password
+        ) < 12:
+            raise RuntimeError(
+                "Refusing to start in production with a default or short bootstrap admin password"
             )
 
     engine = init_db(settings.database_url)
