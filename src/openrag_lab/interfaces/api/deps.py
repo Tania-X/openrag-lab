@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
+from openrag_lab.domain.shared.enums import UserStatus
 from openrag_lab.domain.shared.errors import PermissionDeniedError
 from openrag_lab.domain.shared.ids import UserId
 from openrag_lab.infrastructure.db.repositories.identity import SqlUserRepository
@@ -57,6 +58,8 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     if user.tenant_id.value != tenant_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if user.status != UserStatus.ACTIVE:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is disabled")
 
     return CurrentUser(
         user_id=user.id.value,

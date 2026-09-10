@@ -48,6 +48,8 @@ class AuthService:
         display_name: str | None = None,
         tenant_name: str | None = None,
     ) -> dict:
+        if len(password) < 8:
+            raise InvalidOperationError("Password must be at least 8 characters")
         existing_user = await self._user_repo.find_by_username(username)
         if existing_user is not None:
             raise AlreadyExistsError(f"Username already exists: {username}")
@@ -55,32 +57,42 @@ class AuthService:
         tenant_name = tenant_name or username
         base_slug = slugify(tenant_name)
         tenant_slug = base_slug
-        while await self._tenant_service.get_tenant_by_slug(tenant_slug) is not None:
+        for _ in range(5):
+            if await self._tenant_service.get_tenant_by_slug(tenant_slug) is None:
+                break
             tenant_slug = f"{base_slug}-{secrets.token_hex(3)}"
-
-        tenant = await self._tenant_service.create_tenant(tenant_name, tenant_slug)
-        user = User(
-            id=UserId.generate(),
-            tenant_id=tenant.id,
-            username=username,
-            password_hash=hash_password(password),
-            display_name=display_name,
-        )
-        await self._user_repo.save(user)
-
-        tenant_admin_role = await self._role_repo.find_by_name(TenantRoleName.TENANT_ADMIN)
-        if tenant_admin_role is None:
-            raise NotFoundError("Built-in tenant_admin role not found")
-        await self._tenant_user_role_repo.assign_role(
-            TenantUserRole(
-                tenant_id=tenant.id,
-                user_id=user.id,
-                role_id=tenant_admin_role.id,
+        else:
+            raise AlreadyExistsError(
+                f"Could not allocate a unique tenant slug for: {tenant_name}"
             )
-        )
 
-        await self._session.commit()
-        return self._token_response(user)
+        try:
+            tenant = await self._tenant_service.create_tenant(tenant_name, tenant_slug)
+            user = User(
+                id=UserId.generate(),
+                tenant_id=tenant.id,
+                username=username,
+                password_hash=hash_password(password),
+                display_name=display_name,
+            )
+            await self._user_repo.save(user)
+
+            tenant_admin_role = await self._role_repo.find_by_name(TenantRoleName.TENANT_ADMIN)
+            if tenant_admin_role is None:
+                raise NotFoundError("Built-in tenant_admin role not found")
+            await self._tenant_user_role_repo.assign_role(
+                TenantUserRole(
+                    tenant_id=tenant.id,
+                    user_id=user.id,
+                    role_id=tenant_admin_role.id,
+                )
+            )
+
+            await self._session.commit()
+            return self._token_response(user)
+        except Exception:
+            await self._session.rollback()
+            raise
 
     async def login(self, username: str, password: str) -> dict:
         user = await self._user_repo.find_by_username(username)
@@ -96,6 +108,8 @@ class AuthService:
             raise NotFoundError("User not found")
         if user.tenant_id.value != tenant_id:
             raise NotFoundError("User not found")
+        if user.status != UserStatus.ACTIVE:
+            raise InvalidOperationError("User is disabled")
         permissions = await self._rbac.effective_permissions(user.id.value, tenant_id)
         return {
             "user_id": user.id.value,

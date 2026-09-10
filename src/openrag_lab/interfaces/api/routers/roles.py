@@ -32,6 +32,8 @@ class PermissionOut(BaseModel):
 
 @router.get("/api/roles", response_model=list[RoleOut])
 async def list_roles(
+    # Phase 1: roles/permissions are global built-in catalogs, intentionally
+    # shared across tenants. Tenant-specific role customization is a later phase.
     session: DbSession,
     _: Annotated[CurrentUser, Depends(require_permission("roles:read"))],
 ) -> list[RoleOut]:
@@ -42,7 +44,7 @@ async def list_roles(
             id=r.id.value,
             name=r.name,
             description=r.description,
-            permissions=[str(p) for p in sorted(r.permissions)],
+            permissions=sorted(r.permissions),
         )
         for r in roles
     ]
