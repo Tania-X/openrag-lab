@@ -34,7 +34,7 @@ class UserService:
         username: str,
         password: str,
         tenant_id: str,
-        role_name: str = TenantRoleName.USER,
+        role_name: TenantRoleName = TenantRoleName.USER,
         display_name: str | None = None,
     ) -> User:
         if await self._user_repo.find_by_username(username) is not None:
@@ -44,11 +44,12 @@ class UserService:
         if tenant is None:
             raise NotFoundError(f"Tenant not found: {tenant_id}")
 
-        if role_name not in TENANT_ROLES:
-            raise NotFoundError(f"Tenant role not found: {role_name}")
-        role = await self._role_repo.find_by_name(role_name)
+        role_key = role_name.value if isinstance(role_name, TenantRoleName) else str(role_name)
+        if role_key not in TENANT_ROLES:
+            raise NotFoundError(f"Tenant role not found: {role_key}")
+        role = await self._role_repo.find_by_name(role_key)
         if role is None:
-            raise NotFoundError(f"Role not found: {role_name}")
+            raise NotFoundError(f"Role not found: {role_key}")
 
         user = User(
             id=UserId.generate(),

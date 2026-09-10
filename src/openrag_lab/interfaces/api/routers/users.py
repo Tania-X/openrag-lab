@@ -53,7 +53,7 @@ async def create_user(
             username=body.username,
             password=body.password,
             tenant_id=target_tenant_id,
-            role_name=body.role_name.value,
+            role_name=body.role_name,
             display_name=body.display_name,
         )
         await session.commit()

@@ -4,6 +4,8 @@ from sqlalchemy.pool import StaticPool
 
 from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.application.identity.user_service import UserService
+from openrag_lab.config import get_settings
+from openrag_lab.domain.shared.enums import TenantRoleName
 from openrag_lab.infrastructure.db import models  # noqa: F401
 from openrag_lab.infrastructure.db.base import Base
 from openrag_lab.infrastructure.db.seed import TENANT_ROLES, seed_identity
@@ -29,7 +31,11 @@ async def test_register_login_and_admin_create_user() -> None:
 
     async with session_factory() as session:
         service = AuthService(session)
-        token = await service.login("admin", "admin123")
+        settings = get_settings()
+        token = await service.login(
+            settings.bootstrap_admin_username,
+            settings.bootstrap_admin_password,
+        )
         assert token["username"] == "admin"
 
     async with session_factory() as session:
@@ -49,7 +55,7 @@ async def test_register_login_and_admin_create_user() -> None:
             username="bob",
             password="bobpass",
             tenant_id=result["tenant_id"],
-            role_name="viewer",
+            role_name=TenantRoleName.VIEWER,
         )
         assert user.username == "bob"
 

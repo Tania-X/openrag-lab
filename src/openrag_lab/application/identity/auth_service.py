@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
@@ -54,9 +56,9 @@ class AuthService:
         tenant_slug = slugify(tenant_name)
         existing_tenant = await self._tenant_service.get_tenant_by_slug(tenant_slug)
         if existing_tenant is not None:
-            raise AlreadyExistsError(
-                "Tenant already exists; joining an existing tenant is not allowed via register"
-            )
+            # Different usernames can produce the same slug (case/space folding).
+            # Auto-suffix instead of blocking self-service registration.
+            tenant_slug = f"{tenant_slug}-{secrets.token_hex(3)}"
 
         tenant = await self._tenant_service.create_tenant(tenant_name, tenant_slug)
         user = User(

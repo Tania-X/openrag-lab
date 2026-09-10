@@ -25,7 +25,7 @@ async def lifespan(app: FastAPI):
                 "Refusing to start in production with default JWT secret or bootstrap admin password"
             )
 
-    engine = init_db()
+    engine = init_db(settings.database_url)
     try:
         await create_all()
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
