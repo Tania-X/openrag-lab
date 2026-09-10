@@ -38,14 +38,14 @@ async def list_users(
 async def create_user(
     body: CreateUserRequest,
     session: DbSession,
-    _: Annotated[CurrentUser, Depends(require_permission("users:write"))],
+    actor: Annotated[CurrentUser, Depends(require_permission("users:write"))],
 ) -> UserResponse:
     service = UserService(session)
     try:
         user = await service.create_user(
             username=body.username,
             password=body.password,
-            tenant_id=body.tenant_id,
+            tenant_id=actor.tenant_id,
             role_name=body.role_name,
             display_name=body.display_name,
         )

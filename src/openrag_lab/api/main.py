@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from openrag_lab.api.routers import chat, documents, health, search
 from openrag_lab.application.identity.auth_service import AuthService
+from openrag_lab.config import get_settings
 from openrag_lab.infrastructure.db.seed import seed_identity
 from openrag_lab.infrastructure.db.session import create_all, init_db
 from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
@@ -17,6 +18,13 @@ from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings = get_settings()
+    if settings.app_env.lower() == "production":
+        if settings.jwt_secret.startswith("dev-secret") or settings.bootstrap_admin_password == "admin123":
+            raise RuntimeError(
+                "Refusing to start in production with default JWT secret or bootstrap admin password"
+            )
+
     engine = init_db()
     await create_all()
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

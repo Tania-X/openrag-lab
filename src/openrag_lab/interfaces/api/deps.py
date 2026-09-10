@@ -48,7 +48,6 @@ async def get_current_user(
 
     user_id = payload.get("sub")
     tenant_id = payload.get("tenant_id")
-    username = payload.get("username", "")
     if not user_id or not tenant_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
@@ -56,8 +55,14 @@ async def get_current_user(
     user = await user_repo.find_by_id(UserId(user_id))
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if user.tenant_id.value != tenant_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
-    return CurrentUser(user_id=user_id, tenant_id=tenant_id, username=username)
+    return CurrentUser(
+        user_id=user.id.value,
+        tenant_id=user.tenant_id.value,
+        username=user.username,
+    )
 
 
 def require_permission(permission: str) -> Callable:

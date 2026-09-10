@@ -6,7 +6,7 @@ from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.application.identity.user_service import UserService
 from openrag_lab.infrastructure.db import models  # noqa: F401
 from openrag_lab.infrastructure.db.base import Base
-from openrag_lab.infrastructure.db.seed import seed_identity
+from openrag_lab.infrastructure.db.seed import TENANT_ROLES, seed_identity
 
 
 @pytest.mark.asyncio
@@ -41,8 +41,7 @@ async def test_register_login_and_admin_create_user() -> None:
     async with session_factory() as session:
         service = AuthService(session)
         me = await service.me(result["user_id"])
-        assert "users:write" in me["permissions"]  # tenant_admin
-        assert "tenants:read" in me["permissions"]
+        assert TENANT_ROLES["tenant_admin"] <= set(me["permissions"])
 
     async with session_factory() as session:
         service = UserService(session)
