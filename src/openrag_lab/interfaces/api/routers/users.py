@@ -6,6 +6,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from openrag_lab.application.identity.rbac_service import RbacService
 from openrag_lab.application.identity.user_service import UserService
 from openrag_lab.domain.shared.errors import DomainError
 from openrag_lab.interfaces.api.deps import CurrentUser, DbSession, require_permission
@@ -20,7 +21,7 @@ def _to_response(user) -> UserResponse:
         tenant_id=user.tenant_id.value,
         username=user.username,
         display_name=user.display_name,
-        status=user.status.value,
+        status=str(user.status.value),
     )
 
 
@@ -40,16 +41,23 @@ async def create_user(
     session: DbSession,
     actor: Annotated[CurrentUser, Depends(require_permission("users:write"))],
 ) -> UserResponse:
+    target_tenant_id = body.tenant_id or actor.tenant_id
+    if target_tenant_id != actor.tenant_id:
+        rbac = RbacService(session)
+        if not await rbac.is_super_admin(actor.user_id):
+            raise HTTPException(status_code=403, detail="permission_denied")
+
     service = UserService(session)
     try:
         user = await service.create_user(
             username=body.username,
             password=body.password,
-            tenant_id=actor.tenant_id,
-            role_name=body.role_name,
+            tenant_id=target_tenant_id,
+            role_name=body.role_name.value,
             display_name=body.display_name,
         )
         await session.commit()
     except DomainError as exc:
+        await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return _to_response(user)

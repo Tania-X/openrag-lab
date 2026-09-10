@@ -43,7 +43,11 @@ class RbacService:
         tenant_roles = await self._tenant_role_repo.roles_of_user_in_tenant(
             TenantId(tenant_id), UserId(user_id)
         )
-        return merge_user_permissions(user, tenant_roles, [])
+        return merge_user_permissions(user, tenant_roles, global_roles)
+
+    async def is_super_admin(self, user_id: str) -> bool:
+        global_roles = await self._global_role_repo.global_roles_of_user(UserId(user_id))
+        return any(r.name == GlobalRoleName.SUPER_ADMIN for r in global_roles)
 
     async def has_permission(self, user_id: str, tenant_id: str, permission: str) -> bool:
         permissions = await self.effective_permissions(user_id, tenant_id)

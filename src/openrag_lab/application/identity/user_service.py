@@ -14,6 +14,7 @@ from openrag_lab.infrastructure.db.repositories.identity import (
     SqlTenantUserRoleRepository,
     SqlUserRepository,
 )
+from openrag_lab.infrastructure.db.seed import TENANT_ROLES
 from openrag_lab.infrastructure.security.password import hash_password
 
 
@@ -43,6 +44,8 @@ class UserService:
         if tenant is None:
             raise NotFoundError(f"Tenant not found: {tenant_id}")
 
+        if role_name not in TENANT_ROLES:
+            raise NotFoundError(f"Tenant role not found: {role_name}")
         role = await self._role_repo.find_by_name(role_name)
         if role is None:
             raise NotFoundError(f"Role not found: {role_name}")

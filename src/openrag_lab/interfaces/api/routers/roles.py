@@ -42,7 +42,7 @@ async def list_roles(
             id=r.id.value,
             name=r.name,
             description=r.description,
-            permissions=sorted(r.permissions),
+            permissions=[str(p) for p in sorted(r.permissions)],
         )
         for r in roles
     ]

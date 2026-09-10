@@ -26,13 +26,16 @@ async def lifespan(app: FastAPI):
             )
 
     engine = init_db()
-    await create_all()
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        await seed_identity(session)
-        await session.commit()
-        await AuthService(session).ensure_bootstrap_admin()
-    yield
+    try:
+        await create_all()
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            await seed_identity(session)
+            await session.commit()
+            await AuthService(session).ensure_bootstrap_admin()
+        yield
+    finally:
+        await engine.dispose()
 
 
 app = FastAPI(title="OpenRAG Lab API", version="0.1.0", lifespan=lifespan)

@@ -52,7 +52,7 @@ class AuthService:
 
         tenant_name = tenant_name or username
         tenant_slug = slugify(tenant_name)
-        existing_tenant = await self._tenant_service._repo.find_by_slug(tenant_slug)
+        existing_tenant = await self._tenant_service.get_tenant_by_slug(tenant_slug)
         if existing_tenant is not None:
             raise AlreadyExistsError(
                 "Tenant already exists; joining an existing tenant is not allowed via register"
@@ -86,7 +86,7 @@ class AuthService:
         user = await self._user_repo.find_by_username(username)
         if user is None or not verify_password(password, user.password_hash):
             raise InvalidOperationError("Invalid username or password")
-        if user.status is not UserStatus.ACTIVE:
+        if user.status != UserStatus.ACTIVE:
             raise InvalidOperationError("User is disabled")
         return self._token_response(user)
 
@@ -109,7 +109,7 @@ class AuthService:
         if existing is not None:
             return
 
-        tenant = await self._tenant_service._repo.find_by_slug("default")
+        tenant = await self._tenant_service.get_tenant_by_slug("default")
         if tenant is None:
             tenant = await self._tenant_service.create_tenant("Default", "default")
 

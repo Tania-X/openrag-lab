@@ -35,3 +35,6 @@ class TenantService:
 
     async def get_tenant(self, tenant_id: TenantId) -> Tenant | None:
         return await self._repo.find_by_id(tenant_id)
+
+    async def get_tenant_by_slug(self, slug: str) -> Tenant | None:
+        return await self._repo.find_by_slug(slug)
