@@ -10,7 +10,7 @@ from openrag_lab.application.identity.rbac_service import RbacService
 from openrag_lab.application.identity.tenant_service import TenantService
 from openrag_lab.application.identity.user_service import UserService
 from openrag_lab.domain.shared.enums import TenantStatus
-from openrag_lab.domain.shared.errors import DomainError
+from openrag_lab.domain.shared.errors import AlreadyExistsError, DomainError
 from openrag_lab.domain.shared.ids import TenantId
 from openrag_lab.interfaces.api.deps import CurrentUser, DbSession, require_permission
 from openrag_lab.interfaces.schemas.user import CreateUserRequest, UserResponse
@@ -49,6 +49,9 @@ async def create_user(
         rbac = RbacService(session)
         if not await rbac.is_super_admin(actor.user_id):
             raise HTTPException(status_code=403, detail="permission_denied")
+        # Design intent: super_admin is the global root and may create users
+        # (including tenant_admin) in any tenant. Tenant admins are limited to
+        # their own tenant by the check above.
 
     tenant = await TenantService(session).get_tenant(TenantId(target_tenant_id))
     if tenant is None:
@@ -66,6 +69,9 @@ async def create_user(
             display_name=body.display_name,
         )
         await session.commit()
+    except AlreadyExistsError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (DomainError, ValueError) as exc:
         await session.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc

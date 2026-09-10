@@ -12,7 +12,7 @@ from openrag_lab.api.routers import chat, documents, health, search
 from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.config import get_settings
 from openrag_lab.infrastructure.db.seed import seed_identity
-from openrag_lab.infrastructure.db.session import create_all, init_db
+from openrag_lab.infrastructure.db.session import create_all, init_db, reset_db
 from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
 
 
@@ -44,6 +44,9 @@ async def lifespan(app: FastAPI):
             await session.commit()
             await AuthService(session).ensure_bootstrap_admin()
         yield
+    except Exception:
+        reset_db()
+        raise
     finally:
         await engine.dispose()
 

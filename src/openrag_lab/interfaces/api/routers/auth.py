@@ -7,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 
 from openrag_lab.application.identity.auth_service import AuthService
+from openrag_lab.config import get_settings
 from openrag_lab.domain.shared.errors import AlreadyExistsError, DomainError, InvalidOperationError
 from openrag_lab.interfaces.api.deps import CurrentUser, DbSession, get_current_user
 from openrag_lab.interfaces.schemas.auth import (
@@ -21,6 +22,8 @@ router = APIRouter(tags=["auth"])
 
 @router.post("/api/auth/register", response_model=TokenResponse)
 async def register(body: RegisterRequest, session: DbSession) -> TokenResponse:
+    if not get_settings().allow_self_registration:
+        raise HTTPException(status_code=403, detail="self_registration_disabled")
     service = AuthService(session)
     try:
         result = await service.register(

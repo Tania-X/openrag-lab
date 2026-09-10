@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import secrets
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.domain.identity.models import Tenant
@@ -12,7 +14,11 @@ from openrag_lab.infrastructure.db.repositories.identity import SqlTenantReposit
 
 
 def slugify(name: str) -> str:
-    return name.strip().lower().replace(" ", "-")[:128]
+    slug = "-".join(
+        part for part in "".join(c if c.isalnum() else "-" for c in name.strip().lower()).split("-") if part
+    )
+    slug = slug[:128]
+    return slug or f"tenant-{secrets.token_hex(4)}"
 
 
 class TenantService:

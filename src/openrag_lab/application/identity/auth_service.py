@@ -94,6 +94,8 @@ class AuthService:
         user = await self._user_repo.find_by_id(UserId(user_id))
         if user is None:
             raise NotFoundError("User not found")
+        if user.tenant_id.value != tenant_id:
+            raise NotFoundError("User not found")
         permissions = await self._rbac.effective_permissions(user.id.value, tenant_id)
         return {
             "user_id": user.id.value,

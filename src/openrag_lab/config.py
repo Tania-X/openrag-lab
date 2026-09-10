@@ -37,6 +37,7 @@ class Settings(BaseSettings):
 
     # Database / auth
     app_env: str = Field(default="development", alias="APP_ENV")
+    allow_self_registration: bool = Field(default=False, alias="ALLOW_SELF_REGISTRATION")
     database_url: str = Field(default="sqlite+aiosqlite:///data/openrag-lab.db", alias="DATABASE_URL")
     jwt_secret: str = Field(
         default="dev-secret-change-me-please-override-in-production",

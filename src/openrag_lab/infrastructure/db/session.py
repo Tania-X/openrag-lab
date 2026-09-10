@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -31,9 +32,9 @@ def init_db(database_url: str | None = None) -> AsyncEngine:
         return _engine
 
     url = database_url or _default_database_url()
-    if url.startswith("sqlite"):
-        db_path = Path(url.split("///", 1)[-1])
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+    parsed = make_url(url)
+    if parsed.get_backend_name() == "sqlite" and parsed.database not in (None, "", ":memory:"):
+        Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
     _engine = create_async_engine(url, echo=False)
     _session_factory = async_sessionmaker(_engine, expire_on_commit=False)
     return _engine
