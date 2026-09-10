@@ -35,6 +35,19 @@ class Settings(BaseSettings):
         alias="DIFY_RERANK_MODEL",
     )
 
+    # Database / auth
+    app_env: str = Field(default="development", alias="APP_ENV")
+    allow_self_registration: bool = Field(default=False, alias="ALLOW_SELF_REGISTRATION")
+    database_url: str = Field(default="sqlite+aiosqlite:///data/openrag-lab.db", alias="DATABASE_URL")
+    jwt_secret: str = Field(
+        default="dev-secret-change-me-please-override-in-production",
+        alias="JWT_SECRET",
+    )
+    jwt_algorithm: str = Field(default="HS256", alias="JWT_ALGORITHM")
+    jwt_expire_minutes: int = Field(default=24 * 60, alias="JWT_EXPIRE_MINUTES")
+    bootstrap_admin_username: str = Field(default="admin", alias="BOOTSTRAP_ADMIN_USERNAME")
+    bootstrap_admin_password: str = Field(default="admin123", alias="BOOTSTRAP_ADMIN_PASSWORD")
+
     eval_csv: Path = Field(default=PROJECT_ROOT / "configs/eval/fintech-eval.csv", alias="EVAL_CSV")
     dify_rag_lab_path: Path = Field(default=Path("../dify-rag-lab"), alias="DIFY_RAG_LAB_PATH")
     dify_sample_data_path: Path = Field(default=Path("../dify-rag-lab/sample-data"), alias="DIFY_SAMPLE_DATA_PATH")
