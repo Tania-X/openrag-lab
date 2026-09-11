@@ -454,8 +454,10 @@ class SqlDocumentRepository:
         if model is None:
             self._session.add(_document_to_model(document))
             return
+        model.tenant_id = document.tenant_id.value
         model.stored_filename = document.stored_filename
         model.display_name = document.display_name
+        model.uploaded_by = document.uploaded_by.value
         model.mimetype = document.mimetype
         model.size_bytes = document.size_bytes
         model.openrag_document_id = document.openrag_document_id

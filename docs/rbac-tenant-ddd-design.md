@@ -138,7 +138,7 @@ Document（实体，归属 Tenant）
   - uploaded_by
   - mimetype / size_bytes
   - openrag_document_id
-  - rename(display_name, stored_filename)
+  - rename(display_name)      # stored_filename 不可变（含命名空间，是 OpenRAG 里的身份）
 ```
 
 `Permission` 可作为值对象 / 只读实体：

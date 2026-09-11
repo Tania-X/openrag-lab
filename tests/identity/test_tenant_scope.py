@@ -18,18 +18,53 @@ def test_document_namespace_derives_from_slug() -> None:
     assert _tenant().document_namespace == "acme/"
 
 
-def test_scope_filename_prefixes_and_strips_paths() -> None:
+def test_scope_filename_prefixes_a_plain_filename() -> None:
     tenant = _tenant()
     assert tenant.scope_filename("report.pdf") == "acme/report.pdf"
-    assert tenant.scope_filename("  报告 2026.pdf ") == "acme/报告 2026.pdf"
-    assert tenant.scope_filename("../../etc/passwd") == "acme/passwd"
-    assert tenant.scope_filename("nested/dir/report.pdf") == "acme/report.pdf"
+    assert tenant.scope_filename("报告 2026.pdf") == "acme/报告 2026.pdf"
+    assert tenant.scope_filename("report.v2.pdf") == "acme/report.v2.pdf"
 
 
-@pytest.mark.parametrize("filename", ["", "   ", "/", "..", "a/.."])
-def test_scope_filename_rejects_invalid_names(filename: str) -> None:
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "",
+        "   ",
+        "/",
+        "..",
+        "a/..",
+        "../other/report.pdf",
+        "nested/dir/report.pdf",
+        "..\\other\\report.pdf",
+        " report.pdf",
+        "report.pdf ",
+        ".hidden",
+        ".env",
+    ],
+)
+def test_scope_filename_rejects_anything_but_a_plain_filename(filename: str) -> None:
     with pytest.raises(InvalidOperationError):
         _tenant().scope_filename(filename)
+
+
+def test_scope_filename_cannot_collide_with_another_tenants_namespace() -> None:
+    acme = _tenant(slug="acme")
+    acme2 = _tenant(slug="acme2")
+    # Both tenants can only ever produce names inside their own prefix.
+    assert acme.scope_filename("budget.md") == "acme/budget.md"
+    assert acme2.scope_filename("budget.md") == "acme2/budget.md"
+    with pytest.raises(InvalidOperationError):
+        acme.scope_filename("acme2/budget.md")
+
+
+@pytest.mark.parametrize("slug", ["", "  ", ".", "..", "acme/eu", "acme eu", "acme\\eu", "acme\n"])
+def test_tenant_slug_must_be_namespace_safe(slug: str) -> None:
+    with pytest.raises(InvalidOperationError):
+        _tenant(slug=slug)
+
+
+def test_tenant_slug_allows_unicode_alphanumerics() -> None:
+    assert _tenant(slug="星云金融").document_namespace == "星云金融/"
 
 
 def test_resolve_tenant_scope_uses_shared_key_and_namespace() -> None:
@@ -42,3 +77,12 @@ def test_resolve_tenant_scope_uses_shared_key_and_namespace() -> None:
 def test_resolve_tenant_scope_rejects_disabled_tenant() -> None:
     with pytest.raises(InvalidOperationError):
         resolve_tenant_scope(_tenant(status=TenantStatus.DISABLED))
+
+
+def test_resolve_tenant_scope_requires_a_configured_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "openrag_api_key", "", raising=False)
+    with pytest.raises(RuntimeError, match="OPENRAG_API_KEY"):
+        resolve_tenant_scope(_tenant())

@@ -31,10 +31,18 @@ class TenantScope:
 
 
 def resolve_tenant_scope(tenant: Tenant) -> TenantScope:
-    """Return the OpenRAG scope for ``tenant``."""
+    """Return the OpenRAG scope for ``tenant``.
+
+    Raises ``RuntimeError`` when the shared OpenRAG API key is not configured:
+    that is a deployment error, not a tenant-level failure, and failing here
+    keeps it out of a confusing 401 from OpenRAG later on.
+    """
     tenant.ensure_active()
+    api_key = get_settings().openrag_api_key
+    if not api_key:
+        raise RuntimeError("OPENRAG_API_KEY is not configured")
     return TenantScope(
         tenant_id=tenant.id.value,
         document_namespace=tenant.document_namespace,
-        api_key=get_settings().openrag_api_key,
+        api_key=api_key,
     )

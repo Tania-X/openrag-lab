@@ -67,6 +67,17 @@ class Tenant:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def __post_init__(self) -> None:
+        # The slug is the tenant's document namespace (see below), so it must
+        # never contain a path separator or surrounding whitespace: a slug like
+        # "acme/eu" would let one tenant's namespace swallow another's prefix.
+        if not self.slug or self.slug != self.slug.strip():
+            raise InvalidOperationError(f"Invalid tenant slug: {self.slug!r}")
+        if self.slug in {".", ".."} or any(
+            char.isspace() or char in ("/", "\\") for char in self.slug
+        ):
+            raise InvalidOperationError(f"Invalid tenant slug: {self.slug!r}")
+
     @property
     def document_namespace(self) -> str:
         """Filename namespace that keeps this tenant's documents apart.
@@ -84,11 +95,24 @@ class Tenant:
     def scope_filename(self, filename: str) -> str:
         """Return the namespaced filename used to store ``filename`` in OpenRAG.
 
-        Path separators are stripped so a caller cannot escape the tenant
-        namespace by uploading ``../other/f.pdf``.
+        Only a plain filename is accepted: any path separator, a leading dot or
+        a surrounding-space variant is rejected instead of being normalised
+        away, so a stored name can never be ambiguous about which tenant it
+        belongs to (``a/b.pdf`` and ``b.pdf`` must not collapse into one entry).
+
+        Callers that receive a client-supplied path (for example the multipart
+        ``filename`` of an upload, which some browsers send as
+        ``C:\\fakepath\\report.pdf``) must reduce it to a basename at the API
+        boundary before calling this method.
         """
-        cleaned = filename.strip().replace("\\", "/").rsplit("/", maxsplit=1)[-1]
-        if not cleaned or cleaned in {".", ".."}:
+        cleaned = filename.strip()
+        if (
+            not cleaned
+            or cleaned != filename
+            or cleaned.startswith(".")
+            or "/" in cleaned
+            or "\\" in cleaned
+        ):
             raise InvalidOperationError(f"Invalid document filename: {filename!r}")
         return f"{self.document_namespace}{cleaned}"
 
@@ -192,9 +216,14 @@ class Document:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
-    def rename(self, display_name: str, stored_filename: str) -> None:
-        if not display_name.strip() or not stored_filename.strip():
-            raise InvalidOperationError("Document names must not be empty")
+    def rename(self, display_name: str) -> None:
+        """Change the user-facing name.
+
+        ``stored_filename`` is immutable: it is the document's identity inside
+        OpenRAG and carries the tenant namespace, so renaming it would break
+        both tenant isolation and the registry's mapping.
+        """
+        if not display_name.strip():
+            raise InvalidOperationError("Document name must not be empty")
         self.display_name = display_name
-        self.stored_filename = stored_filename
         self.updated_at = datetime.now(UTC)
