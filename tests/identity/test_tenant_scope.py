@@ -67,11 +67,17 @@ def test_tenant_slug_allows_unicode_alphanumerics() -> None:
     assert _tenant(slug="星云金融").document_namespace == "星云金融/"
 
 
-def test_resolve_tenant_scope_uses_shared_key_and_namespace() -> None:
+def test_resolve_tenant_scope_uses_shared_key_and_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pin the key instead of reading ambient config: CI has no .env, so a test
+    # that depends on a locally configured OPENRAG_API_KEY would be order- and
+    # environment-dependent.
+    monkeypatch.setattr(get_settings(), "openrag_api_key", "orag_test_key", raising=False)
     scope = resolve_tenant_scope(_tenant())
     assert scope.tenant_id == "t1"
     assert scope.document_namespace == "acme/"
-    assert scope.api_key == get_settings().openrag_api_key
+    assert scope.api_key == "orag_test_key"
 
 
 def test_resolve_tenant_scope_rejects_disabled_tenant() -> None:
@@ -82,7 +88,6 @@ def test_resolve_tenant_scope_rejects_disabled_tenant() -> None:
 def test_resolve_tenant_scope_requires_a_configured_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = get_settings()
-    monkeypatch.setattr(settings, "openrag_api_key", "", raising=False)
+    monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
     with pytest.raises(RuntimeError, match="OPENRAG_API_KEY"):
         resolve_tenant_scope(_tenant())
