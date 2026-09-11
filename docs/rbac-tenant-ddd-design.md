@@ -462,6 +462,23 @@ filters.data_sources = ["<具体文件名>"]   → 精确命中
 - 请求里的文件名列表随租户文档数增长，Phase 1 量级可接受；
   后续可改用 knowledge filter（`filter_id`）承载
 
+### 11.3.1 s1p3b 必须遵守的 fail-closed 规则
+
+实测（当前部署，2026-09-11）：
+
+```text
+filters = {"data_sources": []}   → 0 条结果（OpenRAG 会转成 __IMPOSSIBLE_VALUE__）
+filters 缺省 或 filters = {}      → 未过滤，返回全部文档 ⚠️
+```
+
+所以检索链路必须：
+
+```text
+永远带上 data_sources 这个 key（租户没有文档时传空列表），否则退化为全库检索
+```
+
+这条要有专门的测试：租户无文档时检索必须返回空，而不是返回别人的文档。
+
 ### 11.4 存量文档
 
 Phase 1 之前入库的文档没有命名空间前缀，且 owner 属于共享账号。

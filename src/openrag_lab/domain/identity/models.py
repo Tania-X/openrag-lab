@@ -14,6 +14,10 @@ from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.domain.shared.errors import InvalidOperationError
 from openrag_lab.domain.shared.ids import DocumentId, GlobalRoleId, RoleId, TenantId, UserId
 
+#: Longest filename OpenRAG/openrag-lab will store for one document. The tenant
+#: namespace is part of it, so the caller-visible name is whatever remains.
+MAX_STORED_FILENAME_LENGTH = 512
+
 
 @dataclass(slots=True)
 class Permission:
@@ -114,7 +118,13 @@ class Tenant:
             or "\\" in cleaned
         ):
             raise InvalidOperationError(f"Invalid document filename: {filename!r}")
-        return f"{self.document_namespace}{cleaned}"
+        stored = f"{self.document_namespace}{cleaned}"
+        if len(stored) > MAX_STORED_FILENAME_LENGTH:
+            raise InvalidOperationError(
+                f"Document filename is too long ({len(stored)} > "
+                f"{MAX_STORED_FILENAME_LENGTH}): {filename!r}"
+            )
+        return stored
 
     def activate(self) -> None:
         if self.status is TenantStatus.ACTIVE:

@@ -3,7 +3,7 @@
 import pytest
 
 from openrag_lab.config import get_settings
-from openrag_lab.domain.identity.models import Tenant
+from openrag_lab.domain.identity.models import MAX_STORED_FILENAME_LENGTH, Tenant
 from openrag_lab.domain.shared.enums import TenantStatus
 from openrag_lab.domain.shared.errors import InvalidOperationError
 from openrag_lab.domain.shared.ids import TenantId
@@ -45,6 +45,14 @@ def test_scope_filename_prefixes_a_plain_filename() -> None:
 def test_scope_filename_rejects_anything_but_a_plain_filename(filename: str) -> None:
     with pytest.raises(InvalidOperationError):
         _tenant().scope_filename(filename)
+
+
+def test_scope_filename_enforces_stored_name_length() -> None:
+    tenant = _tenant()
+    fits = "a" * (MAX_STORED_FILENAME_LENGTH - len(tenant.document_namespace))
+    assert tenant.scope_filename(fits) == f"acme/{fits}"
+    with pytest.raises(InvalidOperationError):
+        tenant.scope_filename(f"{fits}a")
 
 
 def test_scope_filename_cannot_collide_with_another_tenants_namespace() -> None:

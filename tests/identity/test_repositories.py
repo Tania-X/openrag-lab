@@ -121,3 +121,76 @@ async def test_seed_and_repositories() -> None:
         assert await document_repo.list_by_tenant(TenantId("t1")) == []
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_document_registry_keeps_tenants_apart() -> None:
+    """The registry is what scopes search, so it must never leak across tenants."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        tenant_repo = SqlTenantRepository(session)
+        user_repo = SqlUserRepository(session)
+        document_repo = SqlDocumentRepository(session)
+
+        for tenant_id, slug, username in (
+            ("t1", "acme", "alice"),
+            ("t2", "globex", "bob"),
+        ):
+            await tenant_repo.save(
+                Tenant(id=TenantId(tenant_id), name=slug.title(), slug=slug)
+            )
+            await user_repo.save(
+                User(
+                    id=UserId(f"u-{tenant_id}"),
+                    tenant_id=TenantId(tenant_id),
+                    username=username,
+                    password_hash="hashed",
+                )
+            )
+        await session.flush()
+
+        acme = await tenant_repo.find_by_id(TenantId("t1"))
+        globex = await tenant_repo.find_by_id(TenantId("t2"))
+        assert acme is not None and globex is not None
+
+        await document_repo.save(
+            Document(
+                id=DocumentId("d-acme"),
+                tenant_id=acme.id,
+                stored_filename=acme.scope_filename("report.pdf"),
+                display_name="report.pdf",
+                uploaded_by=UserId("u-t1"),
+            )
+        )
+        await document_repo.save(
+            Document(
+                id=DocumentId("d-globex"),
+                tenant_id=globex.id,
+                stored_filename=globex.scope_filename("report.pdf"),
+                display_name="report.pdf",
+                uploaded_by=UserId("u-t2"),
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        document_repo = SqlDocumentRepository(session)
+        assert await document_repo.list_stored_filenames(TenantId("t1")) == [
+            "acme/report.pdf"
+        ]
+        assert await document_repo.list_stored_filenames(TenantId("t2")) == [
+            "globex/report.pdf"
+        ]
+        assert await document_repo.find_by_stored_filename(
+            TenantId("t1"), "globex/report.pdf"
+        ) is None
+
+    await engine.dispose()

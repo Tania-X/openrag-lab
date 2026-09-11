@@ -74,7 +74,14 @@ class UserGlobalRoleRepository(Protocol):
 
 
 class DocumentRepository(Protocol):
-    """Registry of tenant-owned documents inside the shared OpenRAG index."""
+    """Registry of tenant-owned documents inside the shared OpenRAG index.
+
+    ``save`` is an aggregate write: it inserts a new row or rewrites every
+    mutable field of an existing one. ``created_at`` is set once at insert and
+    never rewritten by an update. ``(tenant_id, stored_filename)`` is unique,
+    so saving a document that would collide with another row raises at flush;
+    callers should look the name up first with ``find_by_stored_filename``.
+    """
 
     async def save(self, document: Document) -> None: ...
     async def find_by_id(self, document_id: DocumentId) -> Document | None: ...
