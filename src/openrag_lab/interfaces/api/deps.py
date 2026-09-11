@@ -11,16 +11,26 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
+from openrag_lab.domain.rag.ports import RagGateway
 from openrag_lab.domain.shared.enums import UserStatus
 from openrag_lab.domain.shared.errors import PermissionDeniedError
 from openrag_lab.domain.shared.ids import UserId
 from openrag_lab.infrastructure.db.repositories.identity import SqlUserRepository
 from openrag_lab.infrastructure.db.session import get_session
+from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
 from openrag_lab.infrastructure.security.jwt import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
+
+
+def get_rag_gateway() -> RagGateway:
+    """Provide the OpenRAG gateway (overridden in tests)."""
+    return OpenRAGGateway()
+
+
+RagGatewayDep = Annotated[RagGateway, Depends(get_rag_gateway)]
 
 
 class CurrentUser:

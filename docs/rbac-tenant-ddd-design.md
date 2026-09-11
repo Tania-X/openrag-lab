@@ -479,6 +479,30 @@ filters 缺省 或 filters = {}      → 未过滤，返回全部文档 ⚠️
 
 这条要有专门的测试：租户无文档时检索必须返回空，而不是返回别人的文档。
 
+实现落点（s1p3b）：
+
+```text
+application/rag/retrieval_scope.py
+  RetrievalScope.filters  → 永远返回 {"data_sources": [...]}（空列表也带 key）
+  RetrievalScopeResolver  → 决定目标租户并做越权判断
+```
+
+测试：`tests/rag/test_retrieval_endpoints.py::test_tenant_without_documents_still_sends_an_empty_scope`
+
+### 11.3.2 命名空间前缀会被 OpenRAG 原样保留（实测）
+
+带 `/` 的文件名不会被 OpenRAG 清洗或改写，端到端实测（2026-09-11）：
+
+```text
+上传 multipart filename = "smoke-tenant/smoke-report.md"
+→ ingest 任务 completed
+→ GET /api/v1/files/get_all 返回 filename = "smoke-tenant/smoke-report.md"（原样）
+→ 该租户带 filters.data_sources 的检索命中，另一租户检索返回 0 条
+→ DELETE /api/v1/documents {"filename": ...} 删除成功
+```
+
+这条是 D1 方案成立的前提：命名空间是文件名前缀，而不是自定义 metadata。
+
 ### 11.4 存量文档
 
 Phase 1 之前入库的文档没有命名空间前缀，且 owner 属于共享账号。
@@ -664,12 +688,51 @@ GET  /api/health
 
 ```text
 GET  /api/auth/me
-POST /api/search
-POST /api/chat
-GET  /api/documents
-POST /api/documents/ingest
-DELETE /api/documents/{filename}
+POST /api/search      # 需要 search:use
+POST /api/chat        # 需要 chat:use
+GET  /api/documents   # s1p3c
+POST /api/documents/ingest      # s1p3c
+DELETE /api/documents/{filename} # s1p3c
 ```
+
+#### POST /api/search（s1p3b 已实现）
+
+```json
+{
+  "query": "投诉时限",
+  "limit": 10,
+  "score_threshold": 0,
+  "rerank": false,
+  "rerank_model": null,
+  "rerank_top_n": null,
+  "tenant_id": null
+}
+```
+
+```json
+{
+  "results": [{"filename": "acme/制度.md", "text": "...", "score": 0.82}],
+  "scope": {"tenant_id": "...", "document_count": 1, "cross_tenant": false}
+}
+```
+
+规则：
+
+- **不接受客户端 `filters`**：租户边界由服务端按 `documents` 登记表生成；
+  传未知字段（含 `filters`）直接 422，避免调用方误以为自己的过滤生效了
+- `tenant_id` 只有 `super_admin` 能用；其他角色传了就 403
+- 不传 `tenant_id` 时一律限定调用者自己的租户（`super_admin` 也一样）
+- 响应中的 `scope` 显式回显本次边界，便于前端与审计确认
+
+#### POST /api/chat（s1p3b 已实现）
+
+请求同构（`message` + `limit` + `score_threshold` + 可选 `tenant_id`），响应：
+
+```json
+{"response": "...", "scope": {"tenant_id": "...", "document_count": 1, "cross_tenant": false}}
+```
+
+状态码：401 未登录 / 403 无权限或跨租户 / 404 租户不存在 / 502 OpenRAG 调用失败。
 
 ### 管理接口（权限保护）
 
@@ -709,8 +772,7 @@ src/openrag_lab/
 │   │   ├── repository.py
 │   │   └── services.py
 │   ├── rag/
-│   │   ├── ports.py
-│   │   └── models.py
+│   │   └── ports.py               # RagGateway 出站端口（Phase 1 无独立领域模型）
 │   └── shared/
 │       ├── errors.py
 │       ├── ids.py
@@ -724,38 +786,51 @@ src/openrag_lab/
 │   │   ├── tenant_service.py
 │   │   └── rbac_service.py
 │   └── rag/
-│       ├── chat_service.py
-│       └── search_service.py
+│       ├── retrieval_scope.py     # 租户边界解析 + 越权判断（fail-closed）
+│       ├── search_service.py
+│       └── chat_service.py
 ├── infrastructure/
 │   ├── db/
-│   │   ├── models/          # users / tenants / roles / permissions / global_roles ...
+│   │   ├── models/          # users / tenants / documents / roles / permissions ...
 │   │   ├── session.py
+│   │   ├── integrity.py     # 启动期数据自检
 │   │   └── repositories/    # SQLAlchemy Repository 实现
 │   ├── security/
 │   │   ├── jwt.py
 │   │   └── password.py
 │   ├── openrag/
-│   │   ├── client.py
+│   │   ├── client.py              # TODO: 仍留在仓库顶层的 client.py，后续搬进来
 │   │   ├── tenant_scope.py        # 租户 → OpenRAG 调用参数（key + 命名空间）
-│   │   └── openrag_port_impl.py
+│   │   └── openrag_port_impl.py   # RagGateway 的 OpenRAG 实现
 │   └── dify/
 │       └── client.py
 ├── interfaces/
 │   ├── api/
-│   │   ├── main.py
+│   │   ├── main.py                # TODO: 仍在 api/main.py
 │   │   ├── deps.py
+│   │   ├── errors.py              # 领域错误 → HTTP 状态码（app 与测试共用）
 │   │   └── routers/
 │   │       ├── auth.py
 │   │       ├── users.py
 │   │       ├── tenants.py
 │   │       ├── roles.py
-│   │       ├── permissions.py
-│   │       ├── search.py
-│   │       ├── chat.py
-│   │       └── documents.py
+│   │       ├── search.py          # s1p3b：已迁入（原 api/routers/search.py 删除）
+│   │       ├── chat.py            # s1p3b：已迁入（原 api/routers/chat.py 删除）
+│   │       └── documents.py       # s1p3c
 │   └── schemas/
 └── cli.py
 ```
+
+已知偏差（后续阶段收敛）：
+
+```text
+- 顶层 client.py / api/main.py / api/routers/documents.py 仍在旧位置
+- s1p3c 会把 documents 路由搬进 interfaces/api/routers/ 并接上登记表
+```
+
+**前端影响**：`/api/search`、`/api/chat`、`/api/documents` 现在都要求登录态，
+现有 lab 前端（`frontend/src/lib/api.ts`）不带 Authorization 头，会收到 401。
+接线属于 Phase 2 前端工作。
 
 ---
 
@@ -781,12 +856,12 @@ class Tenant:
 ### Phase 1：领域 + 基础设施 + API
 
 ```text
-s1p0  设计文档与契约
-s1p1  DDD 骨架 + 数据模型 + Repository + 种子数据
-s1p2  Auth / User / Tenant / RBAC API
-s1p3a 租户文档作用域：document_namespace + documents 登记表
-s1p3b  Search / Chat 接入 RBAC + data_sources 租户过滤
-s1p3c  Documents 查询/上传/删除接入 RBAC + 命名空间 + 登记表
+s1p0  设计文档与契约                      ✅
+s1p1  DDD 骨架 + 数据模型 + Repository    ✅
+s1p2  Auth / User / Tenant / RBAC API     ✅
+s1p3a 租户文档作用域（命名空间 + 登记表）  ✅
+s1p3b Search / Chat 接 RBAC + 租户过滤     ✅
+s1p3c Documents 接 RBAC + 命名空间 + 登记表
 ```
 
 - SQLAlchemy async + SQLite

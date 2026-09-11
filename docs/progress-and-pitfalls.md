@@ -378,6 +378,23 @@ docker restart openrag-backend   # 立刻恢复
   Phase 1 改用文件名命名空间 + `data_sources`，见
   `docs/rbac-tenant-ddd-design.md` §11。
 
+### 检索过滤是 fail-closed 还是 fail-open
+
+```text
+filters = {"data_sources": []}   → 0 条结果（OpenRAG 内部转成 __IMPOSSIBLE_VALUE__）
+filters 缺省 或 filters = {}      → 不做任何过滤，返回全库 ⚠️
+```
+
+所以外部调用方一旦漏传 `data_sources` 这个 key，就会从「查不到」直接变成「查到所有租户」。
+openrag-lab 侧的处理：`RetrievalScope.filters` 永远返回带 key 的过滤器，
+并且不接受客户端传入 `filters`（传了直接 422）。
+
+### 带 `/` 的文件名会被原样保留（D1 方案的前提）
+
+实测（2026-09-11）：multipart filename 传 `smoke-tenant/smoke-report.md`，
+ingest 任务 completed，`files/get_all` 返回的 filename 一模一样；
+该租户检索命中、另一租户检索为 0。
+
 ---
 
 ## 十、TODO
