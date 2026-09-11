@@ -28,13 +28,22 @@ class TenantService:
         self._session = session
         self._repo = SqlTenantRepository(session)
 
-    async def create_tenant(self, name: str, slug: str | None = None) -> Tenant:
+    async def create_tenant(
+        self,
+        name: str,
+        slug: str | None = None,
+    ) -> Tenant:
         slug = slug or slugify(name)
         existing = await self._repo.find_by_slug(slug)
         if existing is not None:
             raise AlreadyExistsError(f"Tenant slug already exists: {slug}")
 
-        tenant = Tenant(id=TenantId.generate(), name=name, slug=slug, status=TenantStatus.ACTIVE)
+        tenant = Tenant(
+            id=TenantId.generate(),
+            name=name,
+            slug=slug,
+            status=TenantStatus.ACTIVE,
+        )
         await self._repo.save(tenant)
         await self._session.flush()
         return tenant

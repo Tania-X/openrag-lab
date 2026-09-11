@@ -12,7 +12,14 @@ from datetime import UTC, datetime
 
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.domain.shared.errors import InvalidOperationError
-from openrag_lab.domain.shared.ids import GlobalRoleId, RoleId, TenantId, UserId
+from openrag_lab.domain.shared.ids import DocumentId, GlobalRoleId, RoleId, TenantId, UserId
+
+#: Longest filename OpenRAG/openrag-lab will store for one document. The tenant
+#: namespace is part of it, so the caller-visible name is whatever remains.
+MAX_STORED_FILENAME_LENGTH = 512
+
+#: Longest user-facing document name.
+MAX_DISPLAY_NAME_LENGTH = 512
 
 
 @dataclass(slots=True)
@@ -56,6 +63,23 @@ class GlobalRole:
         return permission in self.permissions
 
 
+def validate_tenant_slug(slug: str) -> None:
+    """Raise when ``slug`` cannot be used as a document namespace.
+
+    The slug is a tenant's document namespace, so it must never contain a path
+    separator or whitespace: a slug like ``acme/eu`` would let one tenant's
+    namespace swallow another tenant's prefix. It is validated both when a
+    Tenant is constructed and when stored rows are checked, so the rule lives
+    here rather than inside the dataclass.
+    """
+    if not slug or slug != slug.strip():
+        raise InvalidOperationError(f"Invalid tenant slug: {slug!r}")
+    if slug in {".", ".."} or any(
+        char.isspace() or char in ("/", "\\") for char in slug
+    ):
+        raise InvalidOperationError(f"Invalid tenant slug: {slug!r}")
+
+
 @dataclass(slots=True)
 class Tenant:
     """Tenant aggregate root."""
@@ -66,6 +90,53 @@ class Tenant:
     status: TenantStatus = TenantStatus.ACTIVE
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def __post_init__(self) -> None:
+        validate_tenant_slug(self.slug)
+
+    @property
+    def document_namespace(self) -> str:
+        """Filename namespace that keeps this tenant's documents apart.
+
+        All tenants share one OpenRAG deployment and one OpenSearch index, so
+        tenant isolation is expressed as a filename prefix: documents are
+        ingested as ``<namespace><original name>`` and every search adds
+        ``filters["data_sources"] = <the tenant's stored filenames>``.
+
+        The slug is the single source of truth for the namespace; it is
+        immutable in Phase 1, so the prefix never has to be rewritten.
+        """
+        return f"{self.slug}/"
+
+    def scope_filename(self, filename: str) -> str:
+        """Return the namespaced filename used to store ``filename`` in OpenRAG.
+
+        Only a plain filename is accepted: any path separator, a leading dot or
+        a surrounding-space variant is rejected instead of being normalised
+        away, so a stored name can never be ambiguous about which tenant it
+        belongs to (``a/b.pdf`` and ``b.pdf`` must not collapse into one entry).
+
+        Callers that receive a client-supplied path (for example the multipart
+        ``filename`` of an upload, which some browsers send as
+        ``C:\\fakepath\\report.pdf``) must reduce it to a basename at the API
+        boundary before calling this method.
+        """
+        cleaned = filename.strip()
+        if (
+            not cleaned
+            or cleaned != filename
+            or cleaned.startswith(".")
+            or "/" in cleaned
+            or "\\" in cleaned
+        ):
+            raise InvalidOperationError(f"Invalid document filename: {filename!r}")
+        stored = f"{self.document_namespace}{cleaned}"
+        if len(stored) > MAX_STORED_FILENAME_LENGTH:
+            raise InvalidOperationError(
+                f"Document filename is too long ({len(stored)} > "
+                f"{MAX_STORED_FILENAME_LENGTH}): {filename!r}"
+            )
+        return stored
 
     def activate(self) -> None:
         if self.status is TenantStatus.ACTIVE:
@@ -144,3 +215,42 @@ class UserGlobalRole:
     user_id: UserId
     global_role_id: GlobalRoleId
     assigned_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+
+@dataclass(slots=True)
+class Document:
+    """A tenant-owned document that lives in the shared OpenRAG index.
+
+    OpenRAG stores one flat filename per chunk and its public API cannot tag
+    documents with arbitrary metadata, so openrag-lab keeps this registry:
+    it maps the namespaced ``stored_filename`` back to the tenant that owns it
+    and provides the filename list used to scope searches.
+    """
+
+    id: DocumentId
+    tenant_id: TenantId
+    stored_filename: str
+    display_name: str
+    uploaded_by: UserId
+    mimetype: str = "application/octet-stream"
+    size_bytes: int = 0
+    openrag_document_id: str | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def rename(self, display_name: str) -> None:
+        """Change the user-facing name.
+
+        ``stored_filename`` is immutable: it is the document's identity inside
+        OpenRAG and carries the tenant namespace, so renaming it would break
+        both tenant isolation and the registry's mapping.
+        """
+        if not display_name.strip():
+            raise InvalidOperationError("Document name must not be empty")
+        if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
+            raise InvalidOperationError(
+                f"Document name is too long ({len(display_name)} > "
+                f"{MAX_DISPLAY_NAME_LENGTH})"
+            )
+        self.display_name = display_name
+        self.updated_at = datetime.now(UTC)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,9 +14,12 @@ from openrag_lab.api.routers import chat, documents, health, search
 from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.config import get_settings
 from openrag_lab.domain.shared.errors import DomainError, NotFoundError
+from openrag_lab.infrastructure.db.integrity import find_tenants_with_invalid_slug
 from openrag_lab.infrastructure.db.seed import seed_identity
 from openrag_lab.infrastructure.db.session import create_all, init_db, reset_db
 from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -45,6 +49,15 @@ async def lifespan(app: FastAPI):
             await seed_identity(session)
             await session.commit()
             await AuthService(session).ensure_bootstrap_admin()
+            invalid_tenants = await find_tenants_with_invalid_slug(session)
+        if invalid_tenants:
+            # A tenant with a bad slug cannot be served (its slug is its
+            # document namespace), so make the data problem visible at startup
+            # instead of only as failing requests later.
+            logger.error(
+                "Tenants with an unusable slug (requests for them will fail): %s",
+                ", ".join(f"{tenant_id}={slug!r}" for tenant_id, slug in invalid_tenants),
+            )
         yield
     except Exception:
         reset_db()

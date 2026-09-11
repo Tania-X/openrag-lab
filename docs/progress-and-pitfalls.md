@@ -326,7 +326,61 @@ new-api 网关 :3001
 
 ---
 
-## 九、TODO
+## 九、踩坑：OpenRAG API Key 链路会「每 7 天坏一次」
+
+### 现象（2026-09-11）
+
+用 `.env` 里的 `OPENRAG_API_KEY` 调公开 API：
+
+```text
+POST /api/v1/search        → {"error": "AuthenticationException(401, 'Unauthorized')"}
+GET  /api/v1/files/get_all → {"error": "Authentication failed: OpenSearch rejected the credential..."}
+```
+
+但 OpenSearch 集群是 green，admin basic auth 正常，Web UI 也正常。
+
+### 根因
+
+```text
+OpenRAG backend 在进程内缓存一个 anonymous JWT（SessionManager._anonymous_jwt），
+TTL = 7 天，复用时不检查过期。
+API Key 请求的 user.jwt_token 为空 → 走这个缓存 token → OpenSearch 拒绝。
+```
+
+时间线对得上：容器 2026-09-03 17:26 启动 → token 于 2026-09-10 17:26 过期 →
+2026-09-11 起所有 API Key 请求 401。
+
+### 定位证据
+
+| 证据 | 结果 |
+|---|---|
+| OpenSearch 审计日志 `/documents/_search` FAILED_LOGIN 条数 | 09-08/09/10 = 0，09-11 = 10 |
+| 容器内新建 `SessionManager()` mint 新 token 后直连 OpenSearch | 200 ✅ |
+| 把有效 JWT 放进 `/api/v1/search` 的 Authorization 头 | 正常返回结果 ✅ |
+| 人为造过期 JWT 直连 OpenSearch | `Unauthorized`，日志同样打 `No 'Authorization' header`（误导性） |
+
+### 处理
+
+```bash
+docker restart openrag-backend   # 立刻恢复
+```
+
+上游修复方向：复用缓存的 anonymous JWT 前检查 `exp`，过期就重签。
+
+### 附带发现
+
+- `GET /api/users/me`（前端代理那层）**不校验** `X-API-Key`，返回 anonymous 管理员；
+  不能用它解析 API Key 的身份。公开 API 是 `/api/v1/*`。
+- OpenSearch 容器显示 `unhealthy` 只是 compose 健康检查里 `$$OPENSEARCH_PASSWORD`
+  在该容器内未定义（只设了 `OPENSEARCH_INITIAL_ADMIN_PASSWORD`），非功能问题。
+- 一把 API Key 只对应一个 OpenRAG 用户 → 只有一个 `owner`，因此
+  `filters.owners` 不能拿来做多租户隔离（要每租户一个 OpenRAG 用户）；
+  Phase 1 改用文件名命名空间 + `data_sources`，见
+  `docs/rbac-tenant-ddd-design.md` §11。
+
+---
+
+## 十、TODO
 
 - [ ] 生成层评测：Faithfulness / Answer Relevance / Citation Accuracy
   - 用同一批问题让 Dify 和 OpenRAG 各自回答

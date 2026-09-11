@@ -1,6 +1,7 @@
 """ORM models package."""
 
 from openrag_lab.infrastructure.db.models.identity import (
+    DocumentModel,
     GlobalRoleModel,
     PermissionModel,
     RoleModel,
@@ -13,6 +14,7 @@ from openrag_lab.infrastructure.db.models.identity import (
 )
 
 __all__ = [
+    "DocumentModel",
     "GlobalRoleModel",
     "PermissionModel",
     "RoleModel",

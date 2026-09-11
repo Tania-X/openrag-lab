@@ -44,3 +44,12 @@ class GlobalRoleId:
     @classmethod
     def generate(cls) -> GlobalRoleId:
         return cls(str(uuid4()))
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentId:
+    value: str
+
+    @classmethod
+    def generate(cls) -> DocumentId:
+        return cls(str(uuid4()))

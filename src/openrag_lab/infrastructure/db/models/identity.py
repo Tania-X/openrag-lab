@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -23,6 +24,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from openrag_lab.domain.identity.models import (
+    MAX_DISPLAY_NAME_LENGTH,
+    MAX_STORED_FILENAME_LENGTH,
+)
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.infrastructure.db.base import Base
 
@@ -151,3 +156,31 @@ class PermissionModel(Base):
     resource: Mapped[str] = mapped_column(String(128))
     action: Mapped[str] = mapped_column(String(128))
     name: Mapped[str] = mapped_column(String(255), index=True)
+
+
+class DocumentModel(Base):
+    """Registry of tenant-owned documents stored in the shared OpenRAG index."""
+
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "stored_filename", name="uq_documents_tenant_filename"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("tenants.id"), index=True
+    )
+    stored_filename: Mapped[str] = mapped_column(
+        String(MAX_STORED_FILENAME_LENGTH), index=True
+    )
+    display_name: Mapped[str] = mapped_column(String(MAX_DISPLAY_NAME_LENGTH))
+    uploaded_by: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"))
+    mimetype: Mapped[str] = mapped_column(String(255), default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    openrag_document_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

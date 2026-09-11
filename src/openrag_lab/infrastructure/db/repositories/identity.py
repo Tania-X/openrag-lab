@@ -8,6 +8,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.domain.identity.models import (
+    Document,
     GlobalRole,
     Permission,
     Role,
@@ -17,8 +18,16 @@ from openrag_lab.domain.identity.models import (
     UserGlobalRole,
 )
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
-from openrag_lab.domain.shared.ids import GlobalRoleId, RoleId, TenantId, UserId
+from openrag_lab.domain.shared.errors import AlreadyExistsError, InvalidOperationError
+from openrag_lab.domain.shared.ids import (
+    DocumentId,
+    GlobalRoleId,
+    RoleId,
+    TenantId,
+    UserId,
+)
 from openrag_lab.infrastructure.db.models.identity import (
+    DocumentModel,
     GlobalRoleModel,
     PermissionModel,
     RoleModel,
@@ -49,14 +58,24 @@ def _coerce_user_status(value: UserStatus | str) -> UserStatus:
 
 
 def _tenant_to_domain(model: TenantModel) -> Tenant:
-    return Tenant(
-        id=TenantId(model.id),
-        name=model.name,
-        slug=model.slug,
-        status=_coerce_tenant_status(model.status),
-        created_at=_ensure_utc(model.created_at),
-        updated_at=_ensure_utc(model.updated_at),
-    )
+    try:
+        return Tenant(
+            id=TenantId(model.id),
+            name=model.name,
+            slug=model.slug,
+            status=_coerce_tenant_status(model.status),
+            created_at=_ensure_utc(model.created_at),
+            updated_at=_ensure_utc(model.updated_at),
+        )
+    except InvalidOperationError as exc:
+        # A stored row that violates the slug invariant cannot be served: the
+        # slug is the tenant's document namespace, so serving it would break
+        # isolation. Fail with a diagnosable message instead of a bare error.
+        raise InvalidOperationError(
+            f"Tenant row {model.id} is unusable: {exc}. "
+            "Repair or remove the row (its slug must not contain whitespace or "
+            "a path separator; see docs/rbac-tenant-ddd-design.md §11)."
+        ) from exc
 
 
 def _tenant_to_model(tenant: Tenant) -> TenantModel:
@@ -373,7 +392,6 @@ class SqlTenantUserRoleRepository:
 
 class SqlUserGlobalRoleRepository:
     """SQLAlchemy UserGlobalRoleRepository."""
-
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
 
@@ -403,4 +421,107 @@ class SqlUserGlobalRoleRepository:
                 global_role_id=role.global_role_id.value,
                 assigned_at=role.assigned_at,
             )
+        )
+
+
+def _document_to_domain(model: DocumentModel) -> Document:
+    return Document(
+        id=DocumentId(model.id),
+        tenant_id=TenantId(model.tenant_id),
+        stored_filename=model.stored_filename,
+        display_name=model.display_name,
+        uploaded_by=UserId(model.uploaded_by),
+        mimetype=model.mimetype,
+        size_bytes=model.size_bytes,
+        openrag_document_id=model.openrag_document_id,
+        created_at=_ensure_utc(model.created_at),
+        updated_at=_ensure_utc(model.updated_at),
+    )
+
+
+def _document_to_model(document: Document) -> DocumentModel:
+    return DocumentModel(
+        id=document.id.value,
+        tenant_id=document.tenant_id.value,
+        stored_filename=document.stored_filename,
+        display_name=document.display_name,
+        uploaded_by=document.uploaded_by.value,
+        mimetype=document.mimetype,
+        size_bytes=document.size_bytes,
+        openrag_document_id=document.openrag_document_id,
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
+
+
+class SqlDocumentRepository:
+    """SQLAlchemy DocumentRepository."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def save(self, document: Document) -> None:
+        model = await self._session.get(DocumentModel, document.id.value)
+        clash = await self._session.execute(
+            select(DocumentModel.id).where(
+                DocumentModel.tenant_id == document.tenant_id.value,
+                DocumentModel.stored_filename == document.stored_filename,
+            )
+        )
+        owner_id = clash.scalar_one_or_none()
+        if owner_id is not None and owner_id != document.id.value:
+            # (tenant_id, stored_filename) is the registry's key: report the
+            # clash as a domain error so callers get a 4xx instead of an
+            # IntegrityError that rolls the whole transaction back at commit.
+            raise AlreadyExistsError(
+                f"Document already registered for tenant {document.tenant_id.value}: "
+                f"{document.stored_filename}"
+            )
+        if model is None:
+            self._session.add(_document_to_model(document))
+            return
+        model.tenant_id = document.tenant_id.value
+        model.stored_filename = document.stored_filename
+        model.display_name = document.display_name
+        model.uploaded_by = document.uploaded_by.value
+        model.mimetype = document.mimetype
+        model.size_bytes = document.size_bytes
+        model.openrag_document_id = document.openrag_document_id
+        model.updated_at = document.updated_at
+
+    async def find_by_id(self, document_id: DocumentId) -> Document | None:
+        model = await self._session.get(DocumentModel, document_id.value)
+        return _document_to_domain(model) if model else None
+
+    async def find_by_stored_filename(
+        self, tenant_id: TenantId, stored_filename: str
+    ) -> Document | None:
+        result = await self._session.execute(
+            select(DocumentModel).where(
+                DocumentModel.tenant_id == tenant_id.value,
+                DocumentModel.stored_filename == stored_filename,
+            )
+        )
+        model = result.scalar_one_or_none()
+        return _document_to_domain(model) if model else None
+
+    async def list_by_tenant(self, tenant_id: TenantId) -> list[Document]:
+        result = await self._session.execute(
+            select(DocumentModel)
+            .where(DocumentModel.tenant_id == tenant_id.value)
+            .order_by(DocumentModel.created_at)
+        )
+        return [_document_to_domain(m) for m in result.scalars().all()]
+
+    async def list_stored_filenames(self, tenant_id: TenantId) -> list[str]:
+        result = await self._session.execute(
+            select(DocumentModel.stored_filename)
+            .where(DocumentModel.tenant_id == tenant_id.value)
+            .order_by(DocumentModel.created_at)
+        )
+        return list(result.scalars().all())
+
+    async def delete(self, document_id: DocumentId) -> None:
+        await self._session.execute(
+            delete(DocumentModel).where(DocumentModel.id == document_id.value)
         )
