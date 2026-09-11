@@ -108,22 +108,37 @@ Tenant（聚合根）
   - name
   - slug
   - status
-  - addUser(user, role)
-  - deactivate()
+  - document_namespace        # 只读派生：f"{slug}/"
+  - scope_filename(filename)  # 生成带命名空间前缀的入库文件名
+  - activate() / disable() / ensure_active()
 
 User（聚合根）
   - UserId
+  - tenant_id
   - username
-  - passwordHash
-  - displayName
+  - password_hash
+  - display_name
   - status
-  - changePassword()
+  - change_password_hash()
+  - activate() / disable() / ensure_active()
 
 Role（聚合根）
   - RoleId
   - name
   - description
-  - hasPermission(permission)
+  - is_system
+  - permissions
+  - has_permission(permission)
+
+Document（实体，归属 Tenant）
+  - DocumentId
+  - tenant_id
+  - stored_filename           # OpenRAG 中的实际文件名（含命名空间）
+  - display_name              # 用户上传时的原始文件名
+  - uploaded_by
+  - mimetype / size_bytes
+  - openrag_document_id
+  - rename(display_name, stored_filename)
 ```
 
 `Permission` 可作为值对象 / 只读实体：
@@ -220,6 +235,16 @@ class TenantUserRoleRepository(Protocol):
 class UserGlobalRoleRepository(Protocol):
     async def global_roles_of_user(self, user_id: UserId) -> list[GlobalRole]: ...
     async def assign_global_role(self, user_id: UserId, role_id: GlobalRoleId) -> None: ...
+
+class DocumentRepository(Protocol):
+    async def save(self, document: Document) -> None: ...
+    async def find_by_id(self, document_id: DocumentId) -> Document | None: ...
+    async def find_by_stored_filename(
+        self, tenant_id: TenantId, stored_filename: str
+    ) -> Document | None: ...
+    async def list_by_tenant(self, tenant_id: TenantId) -> list[Document]: ...
+    async def list_stored_filenames(self, tenant_id: TenantId) -> list[str]: ...
+    async def delete(self, document_id: DocumentId) -> None: ...
 ```
 
 ---
@@ -366,49 +391,98 @@ tenants:write
 
 ## 11. 租户隔离
 
-### 11.1 隔离策略
+### 11.1 隔离策略（Phase 1：文件名命名空间）
 
-Phase 1 采用 **逻辑独立**：
+Phase 1 采用 **逻辑独立 + 文件名命名空间**：
 
 ```text
-物理上共用一套 OpenRAG
-每个租户拥有独立的 OpenRAG API Key / 服务账号
+物理上共用一套 OpenRAG、一个 OpenSearch index
+所有租户共用一把 OpenRAG API Key
+租户边界用「文件名命名空间 + data_sources 过滤」表达，由 openrag-lab 强制
 ```
 
 具体：
 
-- 每个租户在 openrag-lab 中有唯一 `tenant_id`
-- 每个租户对应一个独立的 OpenRAG API Key / 服务账号
-- 使用该租户自己的 API Key 上传文档，OpenRAG 记录的 `owner` 天然归属该租户
-- 调用 OpenRAG Search/Chat 时使用该租户自己的 API Key，并自动注入：
+- 每个租户在 openrag-lab 中有唯一 `tenant_id` 和不可变 `slug`
+- 租户文档命名空间固定为 `document_namespace = "<slug>/"`
+- 入库时统一把文件名写成 `<slug>/<原始文件名>`（例如 `acme/报表.pdf`）
+- openrag-lab 维护 `documents` 登记表，记录「已入库文件名 → 归属租户」
+- 调用 OpenRAG Search/Chat 时，自动注入**本租户已登记的文件名**：
 
 ```json
 {
   "filters": {
-    "owners": ["<tenant-owner-id>"]
+    "data_sources": ["acme/报表.pdf", "acme/制度.md"]
   }
 }
 ```
 
-`owner` 的取值由租户对应的 OpenRAG 服务账号决定，不依赖自定义 metadata。
-自定义 metadata（如 `tenant_id`）仅用于展示/审计，不作为检索隔离条件。
+租户边界不依赖 OpenRAG 的账号体系，也不需要自定义 metadata；
+自定义 metadata（如 `tenant_id`）仅用于展示/审计，不作为隔离条件。
 
-### 11.2 为什么不用 data_sources 做租户隔离
+### 11.2 为什么不用 owners 做租户隔离（已实测否定）
 
-`data_sources` 是文件级过滤，适合“某个知识库子集”；
-租户隔离用 `owners` 更稳定，不依赖文件名。
-
-### 11.3 未来升级
-
-如果某个租户需要更强隔离：
+最初的方案是「每租户一把 OpenRAG API Key，owner 天然归属该租户」，实测不成立：
 
 ```text
-- 独立 OpenRAG API Key
-- 独立 OpenSearch 索引
-- 独立 OpenRAG 部署
+1. owner 只能在入库时由「认证身份」决定
+   OpenRAG 公开 API 无法显式指定 owner（owner 由后端按请求身份注入）
+2. 一把 API Key 只对应一个 OpenRAG 用户 → 只有一个 owner
+   用同一把 key 给所有租户上传，所有文档 owner 完全相同，等于没有隔离
+3. filters.owners 是对 owner 字段的精确（term）查询
+   过滤一个「合成」的 owner（如 tenant:acme）只会得到空结果
 ```
 
-这些可以做成 Infrastructure 层的部署策略，不影响 Domain 模型。
+实测结果：
+
+```text
+filters.owners = ["<共享账号 owner>"]     → 返回全部文档（无隔离）
+filters.owners = ["tenant:<slug>"]        → 返回空（租户查不到任何东西）
+filters.data_sources = ["<具体文件名>"]   → 精确命中
+```
+
+要做到真正的 owner 级隔离，前提是：
+
+```text
+每个租户一个独立的 OpenRAG 用户 + 该用户的 API Key
+```
+
+这属于 OpenRAG 的账号供应问题（需要管理员会话、用户管理），列入后续升级项。
+
+### 11.3 为什么用 data_sources 作为租户边界
+
+- `data_sources` 直接对应 filename 的精确匹配，可控、可测试
+- 文件名列表来自我们自己的 `documents` 登记表，边界由应用层强制
+- 不需要改造现有 OpenRAG 部署，Phase 1 即可验收
+
+已知限制：
+
+- `data_sources` 是精确匹配而非前缀匹配，所以**必须先有登记表**
+- 未登记的文档不会被任何租户检索到（fail-closed，符合安全预期）
+- 请求里的文件名列表随租户文档数增长，Phase 1 量级可接受；
+  后续可改用 knowledge filter（`filter_id`）承载
+
+### 11.4 存量文档
+
+Phase 1 之前入库的文档没有命名空间前缀，且 owner 属于共享账号。
+处理方式（s1p3c 负责）：
+
+```text
+把这些文档按 `<slug>/<原文件名>` 重新入库，登记到对应租户
+```
+
+不在 Domain 里为「无前缀」开特例：命名空间规则保持唯一。
+
+### 11.5 未来升级
+
+```text
+D1（当前）：共享 API Key + 文件名命名空间 + data_sources 过滤
+D2：每租户独立 OpenRAG 用户 + API Key → 切换为 owners 维度
+D3：每租户独立索引 / 独立 OpenRAG 部署
+```
+
+切换 D1 → D2 只影响 `infrastructure/openrag/tenant_scope.py` 这一个端口，
+上层 Application / Domain 不需要改动。
 
 ---
 
@@ -419,11 +493,34 @@ Phase 1 采用 **逻辑独立**：
 ```text
 id
 name
-slug
+slug              # 同时决定 document_namespace = "<slug>/"
 status            # active / disabled
 created_at
 updated_at
 ```
+
+> 说明：`document_namespace` 是 `slug` 的派生值（Domain 里是只读属性），不单独存列；
+> slug 不可变，因此命名空间不需要重写。
+
+### documents
+
+```text
+id
+tenant_id             # 归属租户
+stored_filename       # OpenRAG 中实际的文件名（含命名空间前缀）
+display_name          # 用户上传时的原始文件名
+uploaded_by           # 上传者 user_id
+mimetype
+size_bytes
+openrag_document_id   # OpenRAG 返回的 document_id（用于删除/对账）
+created_at
+updated_at
+
+unique(tenant_id, stored_filename)
+```
+
+`documents` 是租户隔离的落点：检索时用 `list_stored_filenames(tenant_id)` 生成
+`filters["data_sources"]`。
 
 ### users
 
@@ -598,6 +695,7 @@ src/openrag_lab/
 │   │   └── password.py
 │   ├── openrag/
 │   │   ├── client.py
+│   │   ├── tenant_scope.py        # 租户 → OpenRAG 调用参数（key + 命名空间）
 │   │   └── openrag_port_impl.py
 │   └── dify/
 │       └── client.py
@@ -641,12 +739,21 @@ class Tenant:
 
 ### Phase 1：领域 + 基础设施 + API
 
+```text
+s1p0  设计文档与契约
+s1p1  DDD 骨架 + 数据模型 + Repository + 种子数据
+s1p2  Auth / User / Tenant / RBAC API
+s1p3a 租户文档作用域：document_namespace + documents 登记表
+s1p3b  Search / Chat 接入 RBAC + data_sources 租户过滤
+s1p3c  Documents 查询/上传/删除接入 RBAC + 命名空间 + 登记表
+```
+
 - SQLAlchemy async + SQLite
 - 领域模型 + Repository
 - JWT / Password
 - 种子数据
 - Auth / RBAC / User / Tenant API
-- Search / Chat / Documents 接权限
+- Search / Chat / Documents 接权限与租户隔离
 - OpenAPI 契约
 
 ### Phase 2：前端
@@ -668,7 +775,8 @@ class Tenant:
 
 ## 18. 待确认/开放问题
 
-- 如何为每个租户创建和管理独立的 OpenRAG API Key / 服务账号？（实现细节，不影响领域模型）
+- 存量文档如何迁到命名空间前缀（倾向重新入库，见 11.4）
+- 单次检索注入的 `data_sources` 列表上限与分批策略
 - 是否允许一个租户下多个角色叠加？
-- 管理员能否跨租户管理？
+- 每租户独立 OpenRAG 用户 / API Key 的供应方式（D2 升级项）
 - 后续是否需要“邀请码 / 邮箱验证”？

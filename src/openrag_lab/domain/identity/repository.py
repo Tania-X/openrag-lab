@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from openrag_lab.domain.identity.models import (
+    Document,
     GlobalRole,
     Permission,
     Role,
@@ -17,7 +18,13 @@ from openrag_lab.domain.identity.models import (
     User,
     UserGlobalRole,
 )
-from openrag_lab.domain.shared.ids import GlobalRoleId, RoleId, TenantId, UserId
+from openrag_lab.domain.shared.ids import (
+    DocumentId,
+    GlobalRoleId,
+    RoleId,
+    TenantId,
+    UserId,
+)
 
 
 class TenantRepository(Protocol):
@@ -64,3 +71,16 @@ class TenantUserRoleRepository(Protocol):
 class UserGlobalRoleRepository(Protocol):
     async def global_roles_of_user(self, user_id: UserId) -> list[GlobalRole]: ...
     async def assign_global_role(self, role: UserGlobalRole) -> None: ...
+
+
+class DocumentRepository(Protocol):
+    """Registry of tenant-owned documents inside the shared OpenRAG index."""
+
+    async def save(self, document: Document) -> None: ...
+    async def find_by_id(self, document_id: DocumentId) -> Document | None: ...
+    async def find_by_stored_filename(
+        self, tenant_id: TenantId, stored_filename: str
+    ) -> Document | None: ...
+    async def list_by_tenant(self, tenant_id: TenantId) -> list[Document]: ...
+    async def list_stored_filenames(self, tenant_id: TenantId) -> list[str]: ...
+    async def delete(self, document_id: DocumentId) -> None: ...

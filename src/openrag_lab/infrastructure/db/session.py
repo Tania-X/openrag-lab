@@ -48,7 +48,12 @@ def reset_db() -> None:
 
 
 async def create_all() -> None:
-    """Create all tables (simple bootstrap; Alembic comes later)."""
+    """Create any missing tables.
+
+    Alembic is the long-term path; until it lands this only creates tables
+    that do not exist yet, so a local SQLite database created by an earlier
+    phase picks up new tables without losing data.
+    """
     engine = init_db()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

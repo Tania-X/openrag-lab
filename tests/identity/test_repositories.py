@@ -2,12 +2,13 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
-from openrag_lab.domain.identity.models import Tenant, TenantUserRole, User
+from openrag_lab.domain.identity.models import Document, Tenant, TenantUserRole, User
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
-from openrag_lab.domain.shared.ids import TenantId, UserId
+from openrag_lab.domain.shared.ids import DocumentId, TenantId, UserId
 from openrag_lab.infrastructure.db import models  # noqa: F401
 from openrag_lab.infrastructure.db.base import Base
 from openrag_lab.infrastructure.db.repositories.identity import (
+    SqlDocumentRepository,
     SqlRoleRepository,
     SqlTenantRepository,
     SqlTenantUserRoleRepository,
@@ -34,7 +35,11 @@ async def test_seed_and_repositories() -> None:
 
     async with session_factory() as session:
         tenant_repo = SqlTenantRepository(session)
-        tenant = Tenant(id=TenantId("t1"), name="Acme", slug="acme")
+        tenant = Tenant(
+            id=TenantId("t1"),
+            name="Acme",
+            slug="acme",
+        )
         await tenant_repo.save(tenant)
 
         user_repo = SqlUserRepository(session)
@@ -64,6 +69,20 @@ async def test_seed_and_repositories() -> None:
         )
         assert [r.name for r in roles] == ["user"]
 
+        document_repo = SqlDocumentRepository(session)
+        await document_repo.save(
+            Document(
+                id=DocumentId("d1"),
+                tenant_id=TenantId("t1"),
+                stored_filename="acme/report.pdf",
+                display_name="report.pdf",
+                uploaded_by=UserId("u1"),
+                mimetype="application/pdf",
+                size_bytes=1234,
+                openrag_document_id="orag-doc-1",
+            )
+        )
+
         global_role_repo = SqlUserGlobalRoleRepository(session)
         # no global roles assigned by default
         assert await global_role_repo.global_roles_of_user(UserId("u1")) == []
@@ -76,10 +95,29 @@ async def test_seed_and_repositories() -> None:
         assert saved is not None
         assert saved.name == "Acme"
         assert saved.status is TenantStatus.ACTIVE
+        assert saved.document_namespace == "acme/"
 
         user_repo = SqlUserRepository(session)
         saved_user = await user_repo.find_by_username("alice")
         assert saved_user is not None
         assert saved_user.status is UserStatus.ACTIVE
+
+        document_repo = SqlDocumentRepository(session)
+        document = await document_repo.find_by_stored_filename(
+            TenantId("t1"), "acme/report.pdf"
+        )
+        assert document is not None
+        assert document.display_name == "report.pdf"
+        assert document.openrag_document_id == "orag-doc-1"
+        assert await document_repo.list_stored_filenames(TenantId("t1")) == [
+            "acme/report.pdf"
+        ]
+
+        await document_repo.delete(DocumentId("d1"))
+        await session.commit()
+
+    async with session_factory() as session:
+        document_repo = SqlDocumentRepository(session)
+        assert await document_repo.list_by_tenant(TenantId("t1")) == []
 
     await engine.dispose()
