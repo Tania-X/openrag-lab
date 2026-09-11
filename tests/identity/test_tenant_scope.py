@@ -3,10 +3,16 @@
 import pytest
 
 from openrag_lab.config import get_settings
-from openrag_lab.domain.identity.models import MAX_STORED_FILENAME_LENGTH, Tenant
+from openrag_lab.domain.identity.models import (
+    MAX_DISPLAY_NAME_LENGTH,
+    MAX_STORED_FILENAME_LENGTH,
+    Document,
+    Tenant,
+    validate_tenant_slug,
+)
 from openrag_lab.domain.shared.enums import TenantStatus
 from openrag_lab.domain.shared.errors import InvalidOperationError
-from openrag_lab.domain.shared.ids import TenantId
+from openrag_lab.domain.shared.ids import DocumentId, TenantId, UserId
 from openrag_lab.infrastructure.openrag.tenant_scope import resolve_tenant_scope
 
 
@@ -75,6 +81,13 @@ def test_tenant_slug_allows_unicode_alphanumerics() -> None:
     assert _tenant(slug="星云金融").document_namespace == "星云金融/"
 
 
+def test_validate_tenant_slug_is_usable_without_building_a_tenant() -> None:
+    """Stored rows are checked with this helper, so it must not need an object."""
+    validate_tenant_slug("acme")
+    with pytest.raises(InvalidOperationError):
+        validate_tenant_slug("acme/eu")
+
+
 def test_resolve_tenant_scope_uses_shared_key_and_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -99,3 +112,33 @@ def test_resolve_tenant_scope_requires_a_configured_api_key(
     monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
     with pytest.raises(RuntimeError, match="OPENRAG_API_KEY"):
         resolve_tenant_scope(_tenant())
+
+
+def _document() -> Document:
+    return Document(
+        id=DocumentId("d1"),
+        tenant_id=TenantId("t1"),
+        stored_filename="acme/report.pdf",
+        display_name="report.pdf",
+        uploaded_by=UserId("u1"),
+    )
+
+
+def test_document_rename_updates_display_name_only() -> None:
+    document = _document()
+    document.rename("季度报告.pdf")
+    assert document.display_name == "季度报告.pdf"
+    assert document.stored_filename == "acme/report.pdf"
+
+
+@pytest.mark.parametrize("name", ["", "   "])
+def test_document_rename_rejects_empty_names(name: str) -> None:
+    with pytest.raises(InvalidOperationError):
+        _document().rename(name)
+
+
+def test_document_rename_enforces_display_name_length() -> None:
+    document = _document()
+    document.rename("a" * MAX_DISPLAY_NAME_LENGTH)
+    with pytest.raises(InvalidOperationError):
+        document.rename("a" * (MAX_DISPLAY_NAME_LENGTH + 1))

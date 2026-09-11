@@ -18,6 +18,9 @@ from openrag_lab.domain.shared.ids import DocumentId, GlobalRoleId, RoleId, Tena
 #: namespace is part of it, so the caller-visible name is whatever remains.
 MAX_STORED_FILENAME_LENGTH = 512
 
+#: Longest user-facing document name.
+MAX_DISPLAY_NAME_LENGTH = 512
+
 
 @dataclass(slots=True)
 class Permission:
@@ -60,6 +63,23 @@ class GlobalRole:
         return permission in self.permissions
 
 
+def validate_tenant_slug(slug: str) -> None:
+    """Raise when ``slug`` cannot be used as a document namespace.
+
+    The slug is a tenant's document namespace, so it must never contain a path
+    separator or whitespace: a slug like ``acme/eu`` would let one tenant's
+    namespace swallow another tenant's prefix. It is validated both when a
+    Tenant is constructed and when stored rows are checked, so the rule lives
+    here rather than inside the dataclass.
+    """
+    if not slug or slug != slug.strip():
+        raise InvalidOperationError(f"Invalid tenant slug: {slug!r}")
+    if slug in {".", ".."} or any(
+        char.isspace() or char in ("/", "\\") for char in slug
+    ):
+        raise InvalidOperationError(f"Invalid tenant slug: {slug!r}")
+
+
 @dataclass(slots=True)
 class Tenant:
     """Tenant aggregate root."""
@@ -72,15 +92,7 @@ class Tenant:
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def __post_init__(self) -> None:
-        # The slug is the tenant's document namespace (see below), so it must
-        # never contain a path separator or surrounding whitespace: a slug like
-        # "acme/eu" would let one tenant's namespace swallow another's prefix.
-        if not self.slug or self.slug != self.slug.strip():
-            raise InvalidOperationError(f"Invalid tenant slug: {self.slug!r}")
-        if self.slug in {".", ".."} or any(
-            char.isspace() or char in ("/", "\\") for char in self.slug
-        ):
-            raise InvalidOperationError(f"Invalid tenant slug: {self.slug!r}")
+        validate_tenant_slug(self.slug)
 
     @property
     def document_namespace(self) -> str:
@@ -235,5 +247,10 @@ class Document:
         """
         if not display_name.strip():
             raise InvalidOperationError("Document name must not be empty")
+        if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
+            raise InvalidOperationError(
+                f"Document name is too long ({len(display_name)} > "
+                f"{MAX_DISPLAY_NAME_LENGTH})"
+            )
         self.display_name = display_name
         self.updated_at = datetime.now(UTC)

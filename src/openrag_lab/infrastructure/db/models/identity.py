@@ -24,7 +24,10 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from openrag_lab.domain.identity.models import MAX_STORED_FILENAME_LENGTH
+from openrag_lab.domain.identity.models import (
+    MAX_DISPLAY_NAME_LENGTH,
+    MAX_STORED_FILENAME_LENGTH,
+)
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.infrastructure.db.base import Base
 
@@ -172,7 +175,7 @@ class DocumentModel(Base):
     stored_filename: Mapped[str] = mapped_column(
         String(MAX_STORED_FILENAME_LENGTH), index=True
     )
-    display_name: Mapped[str] = mapped_column(String(512))
+    display_name: Mapped[str] = mapped_column(String(MAX_DISPLAY_NAME_LENGTH))
     uploaded_by: Mapped[str] = mapped_column(String(64), ForeignKey("users.id"))
     mimetype: Mapped[str] = mapped_column(String(255), default="application/octet-stream")
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)

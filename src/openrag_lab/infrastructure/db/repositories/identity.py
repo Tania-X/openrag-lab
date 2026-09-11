@@ -18,6 +18,7 @@ from openrag_lab.domain.identity.models import (
     UserGlobalRole,
 )
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
+from openrag_lab.domain.shared.errors import AlreadyExistsError, InvalidOperationError
 from openrag_lab.domain.shared.ids import (
     DocumentId,
     GlobalRoleId,
@@ -57,14 +58,24 @@ def _coerce_user_status(value: UserStatus | str) -> UserStatus:
 
 
 def _tenant_to_domain(model: TenantModel) -> Tenant:
-    return Tenant(
-        id=TenantId(model.id),
-        name=model.name,
-        slug=model.slug,
-        status=_coerce_tenant_status(model.status),
-        created_at=_ensure_utc(model.created_at),
-        updated_at=_ensure_utc(model.updated_at),
-    )
+    try:
+        return Tenant(
+            id=TenantId(model.id),
+            name=model.name,
+            slug=model.slug,
+            status=_coerce_tenant_status(model.status),
+            created_at=_ensure_utc(model.created_at),
+            updated_at=_ensure_utc(model.updated_at),
+        )
+    except InvalidOperationError as exc:
+        # A stored row that violates the slug invariant cannot be served: the
+        # slug is the tenant's document namespace, so serving it would break
+        # isolation. Fail with a diagnosable message instead of a bare error.
+        raise InvalidOperationError(
+            f"Tenant row {model.id} is unusable: {exc}. "
+            "Repair or remove the row (its slug must not contain whitespace or "
+            "a path separator; see docs/rbac-tenant-ddd-design.md §11)."
+        ) from exc
 
 
 def _tenant_to_model(tenant: Tenant) -> TenantModel:
@@ -451,6 +462,21 @@ class SqlDocumentRepository:
 
     async def save(self, document: Document) -> None:
         model = await self._session.get(DocumentModel, document.id.value)
+        clash = await self._session.execute(
+            select(DocumentModel.id).where(
+                DocumentModel.tenant_id == document.tenant_id.value,
+                DocumentModel.stored_filename == document.stored_filename,
+            )
+        )
+        owner_id = clash.scalar_one_or_none()
+        if owner_id is not None and owner_id != document.id.value:
+            # (tenant_id, stored_filename) is the registry's key: report the
+            # clash as a domain error so callers get a 4xx instead of an
+            # IntegrityError that rolls the whole transaction back at commit.
+            raise AlreadyExistsError(
+                f"Document already registered for tenant {document.tenant_id.value}: "
+                f"{document.stored_filename}"
+            )
         if model is None:
             self._session.add(_document_to_model(document))
             return
@@ -461,7 +487,7 @@ class SqlDocumentRepository:
         model.mimetype = document.mimetype
         model.size_bytes = document.size_bytes
         model.openrag_document_id = document.openrag_document_id
-        model.updated_at = datetime.now(UTC)
+        model.updated_at = document.updated_at
 
     async def find_by_id(self, document_id: DocumentId) -> Document | None:
         model = await self._session.get(DocumentModel, document_id.value)

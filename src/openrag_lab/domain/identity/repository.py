@@ -76,11 +76,12 @@ class UserGlobalRoleRepository(Protocol):
 class DocumentRepository(Protocol):
     """Registry of tenant-owned documents inside the shared OpenRAG index.
 
-    ``save`` is an aggregate write: it inserts a new row or rewrites every
-    mutable field of an existing one. ``created_at`` is set once at insert and
-    never rewritten by an update. ``(tenant_id, stored_filename)`` is unique,
-    so saving a document that would collide with another row raises at flush;
-    callers should look the name up first with ``find_by_stored_filename``.
+    ``save`` is an aggregate write: it inserts a new row, or rewrites every
+    mutable field (and the aggregate's ``updated_at``) of an existing one.
+    ``created_at`` is set once at insert and never rewritten. Saving a document
+    whose ``(tenant_id, stored_filename)`` is already taken by another row
+    raises ``AlreadyExistsError``, so a caller cannot end up with an
+    unhandled constraint violation at commit time.
     """
 
     async def save(self, document: Document) -> None: ...

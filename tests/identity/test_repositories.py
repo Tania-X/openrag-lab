@@ -4,9 +4,12 @@ from sqlalchemy.pool import StaticPool
 
 from openrag_lab.domain.identity.models import Document, Tenant, TenantUserRole, User
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
+from openrag_lab.domain.shared.errors import AlreadyExistsError, InvalidOperationError
 from openrag_lab.domain.shared.ids import DocumentId, TenantId, UserId
 from openrag_lab.infrastructure.db import models  # noqa: F401
 from openrag_lab.infrastructure.db.base import Base
+from openrag_lab.infrastructure.db.integrity import find_tenants_with_invalid_slug
+from openrag_lab.infrastructure.db.models.identity import TenantModel
 from openrag_lab.infrastructure.db.repositories.identity import (
     SqlDocumentRepository,
     SqlRoleRepository,
@@ -192,5 +195,97 @@ async def test_document_registry_keeps_tenants_apart() -> None:
         assert await document_repo.find_by_stored_filename(
             TenantId("t1"), "globex/report.pdf"
         ) is None
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_saving_a_taken_filename_raises_a_domain_error() -> None:
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        await SqlTenantRepository(session).save(
+            Tenant(id=TenantId("t1"), name="Acme", slug="acme")
+        )
+        await SqlUserRepository(session).save(
+            User(
+                id=UserId("u1"),
+                tenant_id=TenantId("t1"),
+                username="alice",
+                password_hash="hashed",
+            )
+        )
+        await session.flush()
+
+        document_repo = SqlDocumentRepository(session)
+        first = Document(
+            id=DocumentId("d1"),
+            tenant_id=TenantId("t1"),
+            stored_filename="acme/report.pdf",
+            display_name="report.pdf",
+            uploaded_by=UserId("u1"),
+        )
+        await document_repo.save(first)
+
+        # Same stored filename, different record: the registry key is taken.
+        duplicate = Document(
+            id=DocumentId("d2"),
+            tenant_id=TenantId("t1"),
+            stored_filename="acme/report.pdf",
+            display_name="report.pdf",
+            uploaded_by=UserId("u1"),
+        )
+        with pytest.raises(AlreadyExistsError):
+            await document_repo.save(duplicate)
+
+        # Re-saving the same record stays an update, not a clash.
+        first.rename("report-2026.pdf")
+        await document_repo.save(first)
+        await session.commit()
+
+    async with session_factory() as session:
+        document = await SqlDocumentRepository(session).find_by_id(DocumentId("d1"))
+        assert document is not None
+        assert document.display_name == "report-2026.pdf"
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_invalid_stored_slug_is_reported_and_not_served() -> None:
+    """Startup check reports the row; reading it fails with a diagnosable error."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        # Write the bad row through the ORM: the domain invariant only guards
+        # the code paths that go through a Tenant object.
+        session.add(
+            TenantModel(
+                id="bad-tenant",
+                name="Bad",
+                slug="acme/eu",
+                status=TenantStatus.ACTIVE.value,
+            )
+        )
+        await session.commit()
+
+    async with session_factory() as session:
+        assert await find_tenants_with_invalid_slug(session) == [("bad-tenant", "acme/eu")]
+        with pytest.raises(InvalidOperationError, match="bad-tenant"):
+            await SqlTenantRepository(session).find_by_id(TenantId("bad-tenant"))
 
     await engine.dispose()
