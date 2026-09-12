@@ -80,6 +80,12 @@ class RetrievalScopeResolver:
         # branch checks the global role directly instead of consulting the
         # tenant-dimension permissions that `require_permission` uses.
         # Narrowing super_admin later means revisiting this line.
+        #
+        # Order matters: this check runs before the tenant lookup, so a caller
+        # who may not cross tenants gets 403 whether or not the target exists.
+        # Looking the tenant up first would turn the endpoint into a
+        # tenant-enumeration oracle for anyone holding `search:use`
+        # (see docs/api-contract.md §2.1).
         if cross_tenant and not await self._rbac.is_super_admin(actor_user_id):
             # Without this check a tenant id would be a read primitive.
             raise PermissionDeniedError("Cross-tenant access requires super_admin")

@@ -50,6 +50,16 @@ OpenSearch / Langflow / new-api
 - **租户边界由服务端决定**：`/api/search`、`/api/chat` 不接受客户端传 `filters`，
   服务端按调用者租户的登记文档生成 `data_sources` 过滤；
   响应里的 `scope` 回显本次实际边界，便于前端展示与审计。
+- 错误顺序约定（`/api/search`、`/api/chat`）：跨租户请求**先判「能不能跨」，再看租户是否存在**。
+
+```text
+非 super_admin 传一个不存在的 tenant_id → 403（而不是 404）
+super_admin    传一个不存在的 tenant_id → 404
+```
+
+  这是刻意选择：不向「本来就无权跨租户」的调用者暴露任意租户是否存在（避免租户存在性探测）。
+  例外：`POST /api/users` 沿用 s1p2 的顺序（先查租户 → 404，再判跨租户 → 403），
+  两处差异留待后续阶段统一。
 - 注意：OpenRAG 外部服务认证是独立的一层，必须携带 `X-API-Key`，见第 3 节。
 
 ### 2.2 GET /api/health

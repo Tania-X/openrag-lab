@@ -103,12 +103,12 @@ async def _build_client(
             global_role_repo = SqlUserGlobalRoleRepository(session)
             document_repo = SqlDocumentRepository(session)
 
-            for tenant_id, slug, username, status, global_role in (
+            for tid, slug, username, status, global_role in (
                 ("t-acme", "acme", "alice", tenant_status, None),
                 ("t-globex", "globex", "bob", TenantStatus.ACTIVE, None),
             ):
                 tenant = Tenant(
-                    id=TenantId(tenant_id), name=slug.title(), slug=slug, status=status
+                    id=TenantId(tid), name=slug.title(), slug=slug, status=status
                 )
                 await tenant_repo.save(tenant)
                 user = User(
@@ -143,8 +143,8 @@ async def _build_client(
                 _global_role(GlobalRoleName.SUPER_ADMIN.value, super_admin.id)
             )
 
-            for tenant_id, display_name in documents or []:
-                tenant = await tenant_repo.find_by_id(TenantId(tenant_id))
+            for tid, display_name in documents or []:
+                tenant = await tenant_repo.find_by_id(TenantId(tid))
                 assert tenant is not None
                 stored = tenant.scope_filename(display_name)
                 await document_repo.save(
