@@ -371,7 +371,27 @@ OpenRAG 原生 Chat 接口。
 ## 4. OpenAPI 文件
 
 - `openapi/openrag-lab.yaml`：自研前端 ↔ OpenRAG Lab 后端契约
+  **由代码生成，请勿手工修改**：
+
+  ```bash
+  openrag-lab export-openapi        # 等价于 openrag-lab export-openapi -o openapi/openrag-lab.yaml
+  ```
+
+  源是 `api/main.py` 注册的全部路由 + `interfaces/schemas` 的模型。
+  `security` 标注**由 FastAPI 依依赖图自动生成**：凡是经 `get_current_user`（含
+  `require_permission` 间接依赖）保护的操作都带 `security: [{HTTPBearer: []}]`，
+  公开三件套（`/api/health`、`/api/auth/register`、`/api/auth/login`）不带。
+  期望的公开面在 `openapi_export.PUBLIC_OPERATIONS` 里以 **(METHOD, path)** 显式声明，
+  测试会把它与「依赖图推导出的受保护集合」以及生成物三方对齐——
+  即：声明、代码接线、文档任意两者不一致都会失败。
+  `tests/test_openapi_artifact.py` 会重新生成并比对，**契约与代码不一致时 CI 直接失败**——
+  这是为了避免它再次变成"手工维护然后悄悄过期"（曾出现只列 4 条路由、而实际有 13 条的阶段）。
+
 - `openapi/openrag.yaml`：OpenRAG Lab 后端 ↔ OpenRAG Public API 子集
+  这份是**手工维护**的（我们只消费上游 121 条路径里的 6 条，全量生成没有意义），
+  但同一个测试文件会在 OpenRAG 可达时校验：这里写的每个 path/method 都必须存在于
+  线上 spec（`{OPENRAG_BASE_URL}/api/openapi.json`）——上游改名/删端点会让测试失败。
+  注意上游 spec 的路径不带 `/api` 前缀（`/v1/search`），我们调用时走代理的 `/api/v1/search`。
 
 ## 5. 演进约定
 

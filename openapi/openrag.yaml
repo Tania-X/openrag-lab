@@ -2,7 +2,10 @@ openapi: 3.0.3
 info:
   title: OpenRAG Public API (used by OpenRAG Lab)
   version: 0.7.1
-  description: OpenRAG Lab 当前调用的 OpenRAG Public API 子集。
+  description: >-
+    OpenRAG Lab 当前调用的 OpenRAG Public API 子集（手工维护，因为我们只消费其中一部分）。
+    tests/test_openapi_artifact.py 会在 OpenRAG 可达时校验本文件里的每个 path/method
+    确实存在于线上 spec（{OPENRAG_BASE_URL}/api/openapi.json），防止上游改名后这份文档悄悄过期。
 servers:
   - url: http://localhost:3000
     description: OpenRAG frontend proxy
@@ -78,6 +81,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/IngestResponse"
+
+  /api/v1/documents:
+    delete:
+      summary: Delete every chunk stored under a filename
+      operationId: openragDeleteDocument
+      tags:
+        - openrag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - filename
+              properties:
+                filename:
+                  type: string
+                  description: OpenRAG 侧存储名（含租户命名空间前缀）。
+      responses:
+        "200":
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteDocumentResponse"
+        "404":
+          description: 没有匹配到可删除的 chunk（文件不存在或不属于当前身份）
 
   /api/v1/tasks/{task_id}:
     get:
@@ -268,3 +299,19 @@ components:
           type: integer
         embedding_model:
           type: string
+
+    DeleteDocumentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        deleted_chunks:
+          type: integer
+        filename:
+          type: string
+        message:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
