@@ -11,6 +11,7 @@ from collections.abc import Callable
 from typing import Any
 
 from openrag_lab.client import OpenRAGClient
+from openrag_lab.config import get_settings
 
 
 class OpenRAGGateway:
@@ -19,8 +20,20 @@ class OpenRAGGateway:
     def __init__(
         self,
         client_factory: Callable[..., OpenRAGClient] = OpenRAGClient,
+        base_url: str | None = None,
     ) -> None:
         self._client_factory = client_factory
+        self._base_url = base_url
+
+    def _client(self, api_key: str) -> OpenRAGClient:
+        """Build a client for one tenant.
+
+        The address is passed explicitly rather than left to the client's own
+        defaulting, so the gateway always targets the configured OpenRAG
+        instance even if that defaulting changes.
+        """
+        base_url = self._base_url or get_settings().openrag_base_url
+        return self._client_factory(base_url=base_url, api_key=api_key)
 
     def search(
         self,
@@ -34,7 +47,7 @@ class OpenRAGGateway:
         rerank_model: str | None = None,
         rerank_top_n: int | None = None,
     ) -> dict[str, Any]:
-        with self._client_factory(api_key=api_key) as client:
+        with self._client(api_key) as client:
             return client.search(
                 query,
                 filters=filters,
@@ -54,7 +67,7 @@ class OpenRAGGateway:
         limit: int,
         score_threshold: float,
     ) -> dict[str, Any]:
-        with self._client_factory(api_key=api_key) as client:
+        with self._client(api_key) as client:
             return client.chat(
                 message,
                 filters=filters,
