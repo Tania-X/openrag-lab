@@ -29,6 +29,56 @@ from openrag_lab.openapi_export import (
 ARTIFACT = Path("openapi/openrag-lab.yaml")
 
 
+def _api_routes(routes):
+    """Yield APIRoute objects, unwrapping FastAPI's included-router wrappers."""
+    from fastapi.routing import APIRoute
+
+    for route in routes:
+        if isinstance(route, APIRoute):
+            yield route
+            continue
+        inner = getattr(route, "original_router", None) or getattr(route, "router", None)
+        if inner is not None:
+            yield from _api_routes(inner.routes)
+
+
+def _dependency_calls(dependant, seen: set | None = None) -> set:
+    seen = set() if seen is None else seen
+    for sub in dependant.dependencies:
+        seen.add(sub.call)
+        _dependency_calls(sub, seen)
+    return seen
+
+
+def authenticated_operations(app) -> set[tuple[str, str]]:
+    """Operations whose dependency graph actually pulls in authentication.
+
+    Derived from the wiring, not from the contract's own declaration, so the
+    two can be compared against each other.
+    """
+    from openrag_lab.interfaces.api.deps import get_current_user
+
+    found: set[tuple[str, str]] = set()
+    for route in _api_routes(app.routes):
+        if get_current_user in _dependency_calls(route.dependant):
+            found.update((method.upper(), route.path) for method in route.methods)
+    return found
+
+
+def all_operations(app) -> set[tuple[str, str]]:
+    return {
+        (method.upper(), route.path)
+        for route in _api_routes(app.routes)
+        for method in route.methods
+    }
+
+
+def marking_mismatches(spec: dict) -> set[tuple[str, str]]:
+    """Operations whose documented auth marking disagrees with the real graph."""
+    expected_public = all_operations(app) - authenticated_operations(app)
+    return public_operations_in(spec) ^ expected_public
+
+
 def test_the_generated_contract_matches_the_committed_file() -> None:
     """Run `openrag-lab export-openapi` if this fails."""
     committed = ARTIFACT.read_text(encoding="utf-8")
@@ -47,42 +97,41 @@ def test_the_contract_lists_every_route_the_app_serves() -> None:
     assert len(served) >= 13
 
 
-def test_only_the_declared_public_operations_skip_auth() -> None:
-    """Auth marking is explicit and per operation: a new public one must be declared.
+def test_marking_agrees_with_the_real_dependency_graph() -> None:
+    """The document's auth marking must match the app's actual wiring.
 
-    Uses the same predicate as the generator, so the two cannot disagree about
-    what "public" means.
+    Deliberately not derived from PUBLIC_OPERATIONS: if the generator ever
+    failed to mark a protected operation, both the declaration and the document
+    would change together and a self-referential assertion would still pass.
     """
     spec = yaml.safe_load(ARTIFACT.read_text(encoding="utf-8"))
-    assert public_operations_in(spec) == set(PUBLIC_OPERATIONS)
+    assert marking_mismatches(spec) == set()
 
 
-def test_a_declared_public_method_does_not_unmark_its_siblings() -> None:
-    """Publicness is per operation: a path-level rule would leak the POST.
+def test_the_declaration_names_exactly_the_public_operations() -> None:
+    """The public set is explicit, and it is what the graph says is public."""
+    spec = yaml.safe_load(ARTIFACT.read_text(encoding="utf-8"))
+    declared = set(PUBLIC_OPERATIONS)
+    assert public_operations_in(spec) == declared
+    assert declared == all_operations(app) - authenticated_operations(app)
 
-    Uses a throwaway app that mixes a declared-public method with a protected
-    one on the same path, because no current route does that. With the old
-    path-level rule the whole path was skipped, leaving the POST unmarked.
-    """
-    from fastapi import Depends, FastAPI
-    from fastapi.security import HTTPBearer
 
-    probe = FastAPI()
-    # A route using the scheme, so the document has one to point at.
-    probe.add_api_route(
-        "/api/probe-secure",
-        lambda: {"ok": True},
-        methods=["GET"],
-        dependencies=[Depends(HTTPBearer())],
-    )
-    # GET /api/health is declared public; a POST on the same path is not.
-    probe.add_api_route("/api/health", lambda: {"ok": True}, methods=["GET"])
-    probe.add_api_route("/api/health", lambda: {"ok": True}, methods=["POST"])
+def test_the_marking_check_notices_a_protected_operation_left_open() -> None:
+    """Strength check: the comparison above is not vacuous."""
+    spec = yaml.safe_load(ARTIFACT.read_text(encoding="utf-8"))
+    spec["paths"]["/api/auth/me"]["get"].pop("security", None)
 
-    spec = build_spec(probe)
-    probe_paths = spec["paths"]["/api/health"]
-    assert not probe_paths["get"].get("security"), "the declared public method stays open"
-    assert probe_paths["post"].get("security"), "its sibling must stay protected"
+    mismatches = marking_mismatches(spec)
+    assert ("GET", "/api/auth/me") in mismatches
+
+
+def test_the_public_declaration_matches_the_graph_per_operation() -> None:
+    """A mixed path cannot smuggle a protected method into the public set."""
+    documented = yaml.safe_load(ARTIFACT.read_text(encoding="utf-8"))
+    for method, path in PUBLIC_OPERATIONS:
+        operation = documented["paths"][path][method.lower()]
+        assert not operation.get("security"), f"{method} {path} is declared public"
+    assert all(len(entry) == 2 for entry in PUBLIC_OPERATIONS)
 
 
 def test_field_level_public_operations_are_named_with_a_method() -> None:
@@ -104,7 +153,10 @@ def _openrag_openapi_url() -> str | None:
     if not base:
         return None
     parsed = urlparse(base)
-    host, port = parsed.hostname, parsed.port or 80
+    # Scheme-aware default: assuming 80 for https would make the connection fail
+    # and silently skip this check on exactly the deployments that need it.
+    default_port = 443 if parsed.scheme == "https" else 80
+    host, port = parsed.hostname, parsed.port or default_port
     if not host:
         return None
     try:

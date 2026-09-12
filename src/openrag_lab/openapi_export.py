@@ -5,6 +5,11 @@ copy so the frontend contract can be reviewed in a diff. ``tests/
 test_openapi_artifact.py`` regenerates it and fails when the two disagree, so
 the artifact cannot quietly go stale the way a hand-written one does.
 
+Auth marking needs no help here: FastAPI derives ``security`` from the
+dependency graph, so every operation guarded by ``get_current_user`` (directly
+or through ``require_permission``) comes out marked, and the public three come
+out unmarked. The tests verify that against the graph rather than assuming it.
+
 Regenerate with::
 
     openrag-lab export-openapi
@@ -17,14 +22,11 @@ from typing import Any
 
 import yaml
 
-#: ``(METHOD, path)`` pairs that intentionally need no bearer token
-#: (docs/api-contract.md 2.1). Everything else is documented as requiring
-#: HTTPBearer.
-#:
-#: Per *operation*, not per path: declaring a path public would leave every
-#: other method on that path unmarked too, so an endpoint that mixes a public
-#: and a protected method could be documented as public by accident.
-#: Both the generator and tests/test_openapi_artifact.py use this one set.
+#: ``(METHOD, path)`` pairs expected to need no bearer token
+#: (docs/api-contract.md 2.1). This is the declared expectation, asserted
+#: against the app's dependency graph and against the generated document by
+#: tests/test_openapi_artifact.py — a new public endpoint has to be added here,
+#: and that disagreement is what makes the choice visible in review.
 PUBLIC_OPERATIONS = frozenset(
     {
         ("GET", "/api/health"),
@@ -58,23 +60,11 @@ def build_spec(app: Any | None = None) -> dict[str, Any]:
         app = fastapi_app
 
     spec = app.openapi()
-    schemes = spec.get("components", {}).get("securitySchemes", {})
-    if SCHEME_NAME not in schemes:
-        # Without a registered scheme there is nothing to point at; leaving the
-        # operations unmarked is better than inventing a scheme name.
-        return spec
-
-    for path, operations in spec.get("paths", {}).items():
-        for method, operation in operations.items():
-            if not isinstance(operation, dict):
-                continue
-            if (method.upper(), path) in PUBLIC_OPERATIONS:
-                continue
-            # Keep a deliberate declaration (a non-empty security list), but fill
-            # in anything missing or explicitly empty: an empty list means
-            # "no auth required", which is not what these operations mean.
-            if not operation.get("security"):
-                operation["security"] = [{SCHEME_NAME: []}]
+    if SCHEME_NAME not in spec.get("components", {}).get("securitySchemes", {}):
+        raise RuntimeError(
+            "the app exposes no HTTPBearer scheme; auth marking would be "
+            "unverifiable, so refuse to emit a contract"
+        )
     return spec
 
 

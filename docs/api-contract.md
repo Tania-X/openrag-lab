@@ -377,11 +377,13 @@ OpenRAG 原生 Chat 接口。
   openrag-lab export-openapi        # 等价于 openrag-lab export-openapi -o openapi/openrag-lab.yaml
   ```
 
-  源是 `api/main.py` 注册的全部路由 + `interfaces/schemas` 的模型；
-  除 `/api/health`、`/api/auth/register`、`/api/auth/login` 外，所有操作都标注
-  `security: [{HTTPBearer: []}]`。公开面在 `openapi_export.PUBLIC_OPERATIONS` 里显式声明，
-  粒度是 **(METHOD, path)** 而不是 path——否则同一条路径上「一个公开方法 + 一个受保护方法」
-  会把后者也标成公开；已有专门用例验证这一点。
+  源是 `api/main.py` 注册的全部路由 + `interfaces/schemas` 的模型。
+  `security` 标注**由 FastAPI 依依赖图自动生成**：凡是经 `get_current_user`（含
+  `require_permission` 间接依赖）保护的操作都带 `security: [{HTTPBearer: []}]`，
+  公开三件套（`/api/health`、`/api/auth/register`、`/api/auth/login`）不带。
+  期望的公开面在 `openapi_export.PUBLIC_OPERATIONS` 里以 **(METHOD, path)** 显式声明，
+  测试会把它与「依赖图推导出的受保护集合」以及生成物三方对齐——
+  即：声明、代码接线、文档任意两者不一致都会失败。
   `tests/test_openapi_artifact.py` 会重新生成并比对，**契约与代码不一致时 CI 直接失败**——
   这是为了避免它再次变成"手工维护然后悄悄过期"（曾出现只列 4 条路由、而实际有 13 条的阶段）。
 
