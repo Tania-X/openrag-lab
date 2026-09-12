@@ -90,6 +90,7 @@ async def _build_client(
     *,
     actor: CurrentUser | None,
     documents_seed: list[tuple[str, str]] | None = None,
+    seeded_document_id: str | None = None,
     tenant_role: str | None = "user",
 ):
     engine = create_async_engine(
@@ -109,7 +110,11 @@ async def _build_client(
             role_repo = SqlTenantUserRoleRepository(session)
             global_role_repo = SqlUserGlobalRoleRepository(session)
             document_repo = SqlDocumentRepository(session)
-            role = await SqlRoleRepository(session).find_by_name(tenant_role or "user")
+            role = (
+                await SqlRoleRepository(session).find_by_name(tenant_role)
+                if tenant_role is not None
+                else None
+            )
 
             for tid, slug, username in (
                 ("t-acme", "acme", "alice"),
@@ -167,6 +172,7 @@ async def _build_client(
                         uploaded_by=UserId(f"u-{tenant.slug}"),
                         mimetype="text/markdown",
                         size_bytes=10,
+                        openrag_document_id=seeded_document_id,
                     )
                 )
             await session.commit()
@@ -207,11 +213,16 @@ async def test_listing_requires_authentication() -> None:
     assert response.status_code == 401
 
 
-async def test_listing_requires_the_read_permission() -> None:
+async def test_viewer_can_list_documents() -> None:
     async with _build_client(actor=ACME_TENANT, tenant_role="viewer") as (client, _):
         response = await client.get("/api/documents")
-    # viewer has documents:read
     assert response.status_code == 200
+
+
+async def test_listing_is_denied_without_the_read_permission() -> None:
+    async with _build_client(actor=ACME_TENANT, tenant_role=None) as (client, _):
+        response = await client.get("/api/documents")
+    assert response.status_code == 403
 
 
 async def test_listing_returns_only_the_callers_tenant() -> None:
@@ -398,11 +409,24 @@ async def test_reupload_refreshes_the_document_id() -> None:
 async def test_upload_tolerates_a_missing_document_id() -> None:
     """A lookup miss must not fail the upload nor clear a known id."""
     async with _build_client(
-        actor=ACME_TENANT, documents_seed=[("t-acme", "report.md")]
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-doc-known",
     ) as (client, gateway):
         gateway.document_id = None
         response = await client.post("/api/documents/ingest", files=_upload("report.md"))
+        listing = (await client.get("/api/documents")).json()
     assert response.status_code == 201
+    assert listing["files"][0]["openrag_document_id"] == "orag-doc-known"
+
+
+async def test_failed_ingestion_is_a_bad_request_not_a_server_error() -> None:
+    """The contract maps an ingestion failure to 400, not a bare 500."""
+    async with _build_client(actor=ACME_TENANT) as (client, gateway):
+        gateway.task = {"status": "completed", "failed_files": 1}
+        response = await client.post("/api/documents/ingest", files=_upload("broken.md"))
+    assert response.status_code == 400
+    assert "did not complete" in response.json()["detail"]
 
 
 async def test_upload_requires_the_upload_permission() -> None:

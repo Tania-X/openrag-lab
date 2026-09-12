@@ -301,7 +301,6 @@ async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) 
                     uploaded_by=uploaded_by,
                     mimetype=_guess_mimetype(path),
                     size_bytes=path.stat().st_size,
-                    openrag_document_id=str(task.get("document_id") or "") or None,
                 )
             )
 
@@ -312,19 +311,31 @@ async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) 
                 source=source,
                 register=register,
             )
+            # Ingestion tasks do not report it, so read the ids back in one go
+            # (per file would be one listing call each).
+            document_ids = {
+                str(entry.get("filename")): str(entry.get("document_id") or "") or None
+                for entry in client.list_files()
+                if entry.get("filename")
+            }
 
         # Persist the registry before anything destructive runs: the registry is
         # what makes the documents reachable, so it must not depend on the
         # cleanup step succeeding.
         for document in pending:
+            document.openrag_document_id = document_ids.get(document.stored_filename)
             existing = await documents.find_by_stored_filename(
                 tenant.id, document.stored_filename
             )
             if existing is None:
                 await documents.save(document)
             else:
+                # Same replace semantics as the API upload path.
                 existing.size_bytes = document.size_bytes
                 existing.mimetype = document.mimetype
+                if document.openrag_document_id is not None:
+                    existing.openrag_document_id = document.openrag_document_id
+                existing.touch()
                 await documents.save(existing)
         await session.commit()
 

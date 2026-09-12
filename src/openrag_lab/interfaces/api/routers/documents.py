@@ -24,6 +24,7 @@ from openrag_lab.interfaces.api.deps import (
     RagGatewayDep,
     require_permission,
 )
+from openrag_lab.interfaces.api.uploads import STAGING_PREFIX
 from openrag_lab.interfaces.schemas.documents import (
     DeleteDocumentOut,
     DocumentListOut,
@@ -88,7 +89,7 @@ async def ingest_document(
     # The prefix makes leftovers from a killed process recognisable; the file is
     # removed in the finally block, and a crash window during the (bounded)
     # ingestion wait is accepted rather than swept.
-    descriptor, temp_name = tempfile.mkstemp(prefix="openrag-upload-", suffix=suffix)
+    descriptor, temp_name = tempfile.mkstemp(prefix=STAGING_PREFIX, suffix=suffix)
     temp_path = Path(temp_name)
     try:
         try:

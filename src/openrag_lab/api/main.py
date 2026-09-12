@@ -25,6 +25,7 @@ from openrag_lab.interfaces.api.routers import (
     tenants,
     users,
 )
+from openrag_lab.interfaces.api.uploads import sweep_stale_uploads
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "Refusing to start in production with a default or short bootstrap admin password"
             )
+
+    swept = sweep_stale_uploads(settings.upload_ingest_timeout_seconds)
+    if swept:
+        logger.warning("Removed %d stale upload staging file(s) from a previous run", swept)
 
     engine = init_db(settings.database_url)
     try:
