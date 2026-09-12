@@ -139,18 +139,26 @@ class OpenRAGClient:
             body["filter_id"] = filter_id
         return self._request("POST", "/api/v1/chat", json=body)
 
-    def upload_document(self, path: Path) -> dict[str, Any]:
-        """Upload a single document and return the ingestion task response."""
+    def upload_document(self, path: Path, filename: str | None = None) -> dict[str, Any]:
+        """Upload a single document and return the ingestion task response.
+
+        ``filename`` overrides the name OpenRAG stores, which openrag-lab uses
+        to send the tenant-namespaced name instead of the local basename.
+        """
         if not path.exists():
             raise FileNotFoundError(path)
         with path.open("rb") as fh:
             return self._request(
                 "POST",
                 "/api/v1/documents/ingest",
-                files={"file": (path.name, fh)},
+                files={"file": (filename or path.name, fh)},
                 data={"replace_duplicates": "true"},
                 multipart=True,
             )
+
+    def delete_document(self, filename: str) -> dict[str, Any]:
+        """Delete every chunk stored under ``filename``."""
+        return self._request("DELETE", "/api/v1/documents", json={"filename": filename})
 
     def task_status(self, task_id: str) -> dict[str, Any]:
         """Get the current status of an ingestion task."""
@@ -167,12 +175,14 @@ class OpenRAGClient:
             elapsed += self.poll_interval
         raise OpenRAGError(f"Ingestion task {task_id} timed out after {self.ingest_timeout}s")
 
-    def ingest_file(self, path: Path, wait: bool = True) -> dict[str, Any]:
+    def ingest_file(
+        self, path: Path, wait: bool = True, filename: str | None = None
+    ) -> dict[str, Any]:
         """Upload a file and optionally wait for its task to complete."""
-        resp = self.upload_document(path)
+        resp = self.upload_document(path, filename=filename)
         task_id = resp.get("task_id")
         if not task_id:
-            raise OpenRAGError(f"No task_id returned for {path.name}: {resp!r}")
+            raise OpenRAGError(f"No task_id returned for {filename or path.name}: {resp!r}")
         if not wait:
             return resp
         return self.wait_for_task(task_id)

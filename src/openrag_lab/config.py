@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str = Field(default="admin", alias="BOOTSTRAP_ADMIN_USERNAME")
     bootstrap_admin_password: str = Field(default="admin123", alias="BOOTSTRAP_ADMIN_PASSWORD")
 
+    #: Largest document upload accepted, in bytes (default 50 MiB).
+    max_upload_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
+
     eval_csv: Path = Field(default=PROJECT_ROOT / "configs/eval/fintech-eval.csv", alias="EVAL_CSV")
     dify_rag_lab_path: Path = Field(default=Path("../dify-rag-lab"), alias="DIFY_RAG_LAB_PATH")
     dify_sample_data_path: Path = Field(default=Path("../dify-rag-lab/sample-data"), alias="DIFY_SAMPLE_DATA_PATH")

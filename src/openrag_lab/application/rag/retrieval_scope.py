@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
+from openrag_lab.domain.identity.models import Tenant
 from openrag_lab.domain.shared.enums import TenantStatus
 from openrag_lab.domain.shared.errors import (
     InvalidOperationError,
@@ -76,13 +77,18 @@ class RetrievalScopeResolver:
         self._document_repo = SqlDocumentRepository(session)
         self._rbac = RbacService(session)
 
-    async def resolve(
+    async def resolve_tenant(
         self,
         *,
         actor_user_id: str,
         actor_tenant_id: str,
         requested_tenant_id: str | None = None,
-    ) -> RetrievalScope:
+    ) -> tuple[Tenant, bool]:
+        """Return the authorising tenant and whether it is another tenant.
+
+        Document management and retrieval share this so that "which tenant, and
+        may this caller touch it" is decided in exactly one place.
+        """
         target_tenant_id = requested_tenant_id or actor_tenant_id
         cross_tenant = target_tenant_id != actor_tenant_id
 
@@ -108,6 +114,20 @@ class RetrievalScopeResolver:
             raise NotFoundError("Tenant not found")
         if tenant.status is not TenantStatus.ACTIVE:
             raise PermissionDeniedError(f"Tenant {tenant.slug} is not active")
+        return tenant, cross_tenant
+
+    async def resolve(
+        self,
+        *,
+        actor_user_id: str,
+        actor_tenant_id: str,
+        requested_tenant_id: str | None = None,
+    ) -> RetrievalScope:
+        tenant, cross_tenant = await self.resolve_tenant(
+            actor_user_id=actor_user_id,
+            actor_tenant_id=actor_tenant_id,
+            requested_tenant_id=requested_tenant_id,
+        )
 
         scope = resolve_tenant_scope(tenant)
         filenames = await self._document_repo.list_stored_filenames(tenant.id)

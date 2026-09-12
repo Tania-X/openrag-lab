@@ -152,26 +152,70 @@ super_admin    传一个不存在的 tenant_id → 404
 }
 ```
 
-### 2.5 GET /api/documents（s1p3b 已下线，s1p3c 以鉴权版回归）
+### 2.5 GET /api/documents
 
-原实现无鉴权、直接返回全库文件名（泄露所有租户的文件清单），
-已在 s1p3b 中**移除**。
-
-s1p3c 会以新契约回归：需要 `documents:read`，并且只返回调用者租户登记过的文档：
+需要权限：`documents:read`。只返回调用者租户**已登记**的文档
+（登记表 `documents` 同时是检索边界的来源）。
 
 ```json
 {
   "total": 1,
   "files": [
     {
+      "id": "0f1c…",
       "display_name": "40-2024-支付超时处理规范.md",
-      "stored_filename": "acme/40-2024-支付超时处理规范.md",
+      "stored_filename": "default/40-2024-支付超时处理规范.md",
       "mimetype": "text/markdown",
       "size_bytes": 1709,
-      "openrag_document_id": "xxx"
+      "openrag_document_id": "xxx",
+      "uploaded_by": "…",
+      "created_at": "2026-09-12T…",
+      "updated_at": "2026-09-12T…"
     }
   ]
 }
+```
+
+`tenant_id` 查询参数只有 `super_admin` 能用（同 search/chat 的规则）。
+
+### 2.6 POST /api/documents/ingest
+
+需要权限：`documents:upload`。`multipart/form-data`，字段：
+
+```text
+file       必填，文件本体（默认上限 50 MiB，见 MAX_UPLOAD_BYTES）
+tenant_id  可选，只有 super_admin 可用
+```
+
+规则：
+
+```text
+1. 客户端文件名先被降为 basename（浏览器会送 C:\fakepath\x.pdf）
+2. 再由领域规则生成存储名 <slug>/<basename>：
+   含路径分隔符、以点开头、超长的名字一律 400
+3. 同步等待 OpenRAG 入库任务完成；失败/超时不写登记表
+4. 同名重传 = 替换（OpenRAG replace_duplicates=true，登记表 update）
+5. 上传成功才登记，因此登记表里不会出现没索引成功的文档
+```
+
+成功返回 201 与一条 `DocumentOut`（字段同 2.5）。状态码：400 文件名不合法或入库失败、
+403 无权限或跨租户、413 超过上传上限、502 调用 OpenRAG 失败。
+
+### 2.7 DELETE /api/documents/{filename}
+
+需要权限：`documents:delete`。路径参数是**显示名**（不是存储名），
+服务端据此推导存储名并在登记表里校验归属：
+
+```text
+未登记的文档 → 404（因此无法删除别的租户文档：那是 acme/xxx，本租户从未登记）
+```
+
+响应：
+
+```json
+{"filename": "40-2024-支付超时处理规范.md",
+ "stored_filename": "default/40-2024-支付超时处理规范.md",
+ "deleted_chunks": 3}
 ```
 
 ---

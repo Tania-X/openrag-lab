@@ -8,6 +8,7 @@ filters. Keeping it here means the application layer never touches httpx.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from openrag_lab.client import OpenRAGClient
@@ -74,3 +75,20 @@ class OpenRAGGateway:
                 limit=limit,
                 score_threshold=score_threshold,
             )
+
+    def ingest_document(
+        self,
+        *,
+        api_key: str,
+        stored_filename: str,
+        path: Path,
+    ) -> dict[str, Any]:
+        with self._client(api_key) as client:
+            # wait=True: the caller only registers the document once OpenRAG
+            # reports the task finished, so the registry never claims a
+            # document that failed to index.
+            return client.ingest_file(path, wait=True, filename=stored_filename)
+
+    def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
+        with self._client(api_key) as client:
+            return client.delete_document(stored_filename)

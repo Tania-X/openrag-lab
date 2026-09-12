@@ -395,6 +395,27 @@ openrag-lab 侧的处理：`RetrievalScope.filters` 永远返回带 key 的过�
 ingest 任务 completed，`files/get_all` 返回的 filename 一模一样；
 该租户检索命中、另一租户检索为 0。
 
+### Docling 服务：uv 缓存被清后 PDF/DOCX 全部无法入库
+
+现象（2026-09-12，迁移存量文档时暴露）：
+
+```text
+上传 .pdf / .docx → 任务 status=completed 但 failed_files=1（任务体里没有原因）
+backend 日志：Docling result unavailable after SUCCESS status:
+  no existing pdf_resources_dir:
+  /private/tmp/uv-cache/archive-v0/<hash>/lib/python3.13/site-packages/docling_parse/pdf_resources/
+```
+
+原因：宿主机上的 docling-serve（:5001）跑在一个 uv 缓存归档的 venv 里，
+该缓存目录已经被清掉，进程还活着、`/health` 也返回 ok，但真正做转换时找不到
+包内的 `pdf_resources`。
+
+影响：`.md` / `.txt` 走不需要 Docling 的路径，不受影响；
+所有 `.pdf` / `.docx` / `.xlsx` 等需要解析的格式都会失败。
+
+处理：重启 docling-serve（必要时 `uv cache clean` 后重装 docling-parse），
+然后重跑 `openrag-lab reingest-legacy` 补上失败的文档。
+
 ---
 
 ## 十、TODO
