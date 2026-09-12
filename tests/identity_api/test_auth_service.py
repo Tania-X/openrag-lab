@@ -39,6 +39,12 @@ async def test_register_login_and_admin_create_user() -> None:
         assert token["username"] == settings.bootstrap_admin_username
         admin_me = await service.me(token["user_id"], token["tenant_id"])
         assert "tenants:write" in admin_me["permissions"]
+        # super_admin is a *global* role and holds the whole permission catalog,
+        # so per-tenant permissions like search:use/chat:use are included even
+        # though the bootstrap admin has a tenant role only in `default`.
+        # Pinned here because a review read the RAG route check passing for
+        # super_admin as "the permission check is bypassed".
+        assert {"search:use", "chat:use"} <= set(admin_me["permissions"])
 
     async with session_factory() as session:
         service = AuthService(session)
