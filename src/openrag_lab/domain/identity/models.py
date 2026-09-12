@@ -250,6 +250,14 @@ class Document:
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
+    def touch(self) -> None:
+        """Mark the document as modified.
+
+        ``updated_at`` is a creation-time default, so any mutation has to bump
+        it explicitly — the repository persists whatever the entity carries.
+        """
+        self.updated_at = datetime.now(UTC)
+
     def rename(self, display_name: str) -> None:
         """Change the user-facing name.
 

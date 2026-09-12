@@ -7,6 +7,7 @@ claim a document that is not actually indexed.
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -300,10 +301,16 @@ async def test_upload_replaces_an_existing_document_instead_of_failing() -> None
     async with _build_client(
         actor=ACME_TENANT, documents_seed=[("t-acme", "report.md")]
     ) as (client, _):
+        before = (await client.get("/api/documents")).json()["files"][0]
+        await asyncio.sleep(0.01)  # keep the timestamps distinguishable
         response = await client.post("/api/documents/ingest", files=_upload("report.md"))
         listing = (await client.get("/api/documents")).json()
     assert response.status_code == 201
     assert listing["total"] == 1
+    # Replacing is a modification, and the contract exposes updated_at.
+    after = listing["files"][0]
+    assert after["created_at"] == before["created_at"]
+    assert after["updated_at"] > before["updated_at"]
 
 
 async def test_failed_ingestion_leaves_no_registry_entry() -> None:

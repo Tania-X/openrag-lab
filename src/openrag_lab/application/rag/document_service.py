@@ -109,6 +109,9 @@ class DocumentService:
             new_id = str(task.get("document_id") or "") or None
             if new_id is not None:
                 existing.openrag_document_id = new_id
+            # A replacement changes the record, so surface it: updated_at is
+            # exposed by the API and would otherwise stay equal to created_at.
+            existing.touch()
             document = existing
         else:
             document = Document(

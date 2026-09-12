@@ -253,7 +253,7 @@ def _guess_mimetype(path: Path) -> str:
 async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) -> None:
     from openrag_lab.client import OpenRAGClient
     from openrag_lab.domain.identity.models import Document
-    from openrag_lab.domain.shared.ids import DocumentId, UserId
+    from openrag_lab.domain.shared.ids import DocumentId
     from openrag_lab.infrastructure.db.repositories.identity import (
         SqlDocumentRepository,
         SqlTenantRepository,
@@ -272,10 +272,20 @@ async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) 
             raise typer.Exit(code=1)
 
         documents = SqlDocumentRepository(session)
-        uploader = await SqlUserRepository(session).find_by_username(
-            settings.bootstrap_admin_username
-        )
-        uploaded_by = uploader.id if uploader is not None else UserId("legacy-migration")
+        users = SqlUserRepository(session)
+        uploader = await users.find_by_username(settings.bootstrap_admin_username)
+        if uploader is None:
+            # documents.uploaded_by references users.id: fall back to a real
+            # user of the tenant rather than writing a dangling id.
+            tenant_users = await users.list_by_tenant(tenant.id)
+            uploader = tenant_users[0] if tenant_users else None
+        if uploader is None:
+            console.print(
+                "[red]No user found to attribute migrated documents to. "
+                "Bootstrap the tenant (or create a user) first.[/red]"
+            )
+            raise typer.Exit(code=1)
+        uploaded_by = uploader.id
         pending: list[Document] = []
 
         def register(
