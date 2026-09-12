@@ -552,3 +552,60 @@ async def test_reupload_moves_the_uploader_of_record() -> None:
         await client.post("/api/documents/ingest", files=_upload("report.md"))
         listing = (await client.get("/api/documents")).json()
     assert listing["files"][0]["uploaded_by"] == ROOT.user_id
+
+
+class TestStatusCodeContract:
+    """The status codes api-contract.md §2.6/§2.7 promises, pinned end to end.
+
+    Domain errors are mapped centrally in interfaces/api/errors.py; the routers
+    deliberately do not catch them, so these assertions are the evidence that a
+    rejected upload is a 400 and not an unhandled 500.
+    """
+
+    async def test_unsupported_format_is_400(self) -> None:
+        async with _build_client(actor=ACME_TENANT) as (client, _):
+            response = await client.post(
+                "/api/documents/ingest", files=_upload("payload.exe")
+            )
+        assert response.status_code == 400
+
+    async def test_invalid_filename_is_400(self) -> None:
+        async with _build_client(actor=ACME_TENANT) as (client, _):
+            response = await client.post(
+                "/api/documents/ingest", files=_upload("dir/.hidden")
+            )
+        assert response.status_code == 400
+
+    async def test_failed_ingestion_is_400(self) -> None:
+        async with _build_client(actor=ACME_TENANT) as (client, gateway):
+            gateway.task = {"status": "failed", "failed_files": 1}
+            response = await client.post(
+                "/api/documents/ingest", files=_upload("doc.md")
+            )
+        assert response.status_code == 400
+
+    async def test_oversized_upload_is_413(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(get_settings(), "max_upload_bytes", 4, raising=False)
+        async with _build_client(actor=ACME_TENANT) as (client, _):
+            response = await client.post(
+                "/api/documents/ingest", files=_upload("doc.md", b"too long")
+            )
+        assert response.status_code == 413
+
+    async def test_openrag_transport_failure_is_502(self) -> None:
+        async with _build_client(actor=ACME_TENANT) as (client, gateway):
+            gateway.error = OpenRAGError("boom")
+            response = await client.post(
+                "/api/documents/ingest", files=_upload("doc.md")
+            )
+        assert response.status_code == 502
+
+    async def test_unregistered_delete_is_404(self) -> None:
+        async with _build_client(actor=ACME_TENANT, tenant_role="developer") as (
+            client,
+            _,
+        ):
+            response = await client.delete("/api/documents/never-uploaded.md")
+        assert response.status_code == 404

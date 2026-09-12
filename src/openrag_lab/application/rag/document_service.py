@@ -12,6 +12,8 @@ Three rules shape this service:
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,8 @@ from openrag_lab.domain.shared.errors import InvalidOperationError, NotFoundErro
 from openrag_lab.domain.shared.ids import DocumentId, UserId
 from openrag_lab.infrastructure.db.repositories.identity import SqlDocumentRepository
 from openrag_lab.infrastructure.openrag.tenant_scope import resolve_tenant_scope
+
+logger = logging.getLogger(__name__)
 
 
 def basename_for_storage(raw_filename: str) -> str:
@@ -143,8 +147,12 @@ class DocumentService:
                 size_bytes=size_bytes,
                 openrag_document_id=resolved_id,
             )
-        await self._documents.save(document)
-        await self._session.commit()
+        await self._commit_registry(
+            action="register",
+            tenant_label=tenant.slug,
+            stored_filename=stored_filename,
+            save=lambda: self._documents.save(document),
+        )
         return document
 
     async def delete_document(
@@ -190,13 +198,47 @@ class DocumentService:
                 stored_filename=stored_filename,
             )
         )
-        await self._documents.delete(document.id)
-        await self._session.commit()
+        await self._commit_registry(
+            action="remove",
+            tenant_label=tenant.slug,
+            stored_filename=stored_filename,
+            save=lambda: self._documents.delete(document.id),
+        )
         return {
             "filename": display_name,
             "stored_filename": stored_filename,
             "deleted_chunks": int(result.get("deleted_chunks") or 0),
         }
+
+    async def _commit_registry(
+        self,
+        *,
+        action: str,
+        tenant_label: str,
+        stored_filename: str,
+        save: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Persist a registry change, logging loudly if it fails.
+
+        OpenRAG has already been changed by the time this runs, so a failure
+        here leaves the two sides inconsistent (an unregistered document in
+        OpenRAG, or a registry row pointing at nothing). The write is rolled
+        back and the mismatch logged with enough context to repair it by hand.
+        """
+        try:
+            await save()
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            logger.error(
+                "Registry %s failed after OpenRAG was already changed: "
+                "tenant=%s stored=%s",
+                action,
+                tenant_label,
+                stored_filename,
+            )
+            raise
+
 
 def _ensure_ingested(task: dict[str, Any], stored_filename: str) -> None:
     """Raise unless OpenRAG reports the document as ingested."""

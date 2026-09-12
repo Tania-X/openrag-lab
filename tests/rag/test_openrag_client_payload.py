@@ -130,8 +130,9 @@ def test_ingest_sends_the_namespaced_filename(
     assert 'filename="acme/report.md"' in body
     assert "replace_duplicates" in body
     # The call waits for the ingestion task instead of returning a task id.
-    polls = [r for r in sent_requests if r.url.path.startswith("/api/v1/tasks/")]
+    polls = [r for r in sent_requests if "/tasks/" in r.url.path]
     assert polls, "ingest must wait for the task before returning"
+    assert all(r.method == "GET" for r in polls), "polling must be a read"
 
 
 def test_delete_sends_the_namespaced_filename(

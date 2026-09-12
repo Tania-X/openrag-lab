@@ -128,6 +128,7 @@ async def ingest_document(
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:
         temp_path.unlink(missing_ok=True)
+        await file.close()
     return _to_out(document)
 
 
