@@ -20,6 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.rag.retrieval_scope import RetrievalScopeResolver
 from openrag_lab.domain.identity.models import Document
+from openrag_lab.domain.rag.documents import (
+    SUPPORTED_DOCUMENT_EXTENSIONS,
+    is_supported_document,
+)
 from openrag_lab.domain.rag.ports import RagGateway
 from openrag_lab.domain.shared.errors import InvalidOperationError, NotFoundError
 from openrag_lab.domain.shared.ids import DocumentId, UserId
@@ -86,6 +90,13 @@ class DocumentService:
         )
         display_name = basename_for_storage(filename)
         stored_filename = tenant.scope_filename(display_name)  # raises on invalid names
+        if not is_supported_document(display_name):
+            # Same list the CLI ingestion uses: a format that path skips must
+            # not slip into OpenRAG's parsers through the API.
+            raise InvalidOperationError(
+                f"Unsupported file type: {display_name} "
+                f"(accepted: {', '.join(sorted(SUPPORTED_DOCUMENT_EXTENSIONS))})"
+            )
         api_key = resolve_tenant_scope(tenant).api_key
 
         task = await to_thread.run_sync(
@@ -96,6 +107,13 @@ class DocumentService:
             )
         )
         _ensure_ingested(task, stored_filename)
+        # The task payload does not carry the document id, so read it back once
+        # the document exists. Best effort: a miss leaves the field untouched.
+        resolved_id = await to_thread.run_sync(
+            lambda: self._gateway.find_document_id(
+                api_key=api_key, stored_filename=stored_filename
+            )
+        )
 
         existing = await self._documents.find_by_stored_filename(tenant.id, stored_filename)
         if existing is not None:
@@ -107,7 +125,7 @@ class DocumentService:
             existing.uploaded_by = UserId(uploaded_by)
             # Only overwrite an id we actually received: a replace-duplicates
             # task need not echo one, and losing it would be a silent downgrade.
-            new_id = str(task.get("document_id") or "") or None
+            new_id = resolved_id
             if new_id is not None:
                 existing.openrag_document_id = new_id
             # A replacement changes the record, so surface it: updated_at is
@@ -123,7 +141,7 @@ class DocumentService:
                 uploaded_by=UserId(uploaded_by),
                 mimetype=mimetype,
                 size_bytes=size_bytes,
-                openrag_document_id=str(task.get("document_id") or "") or None,
+                openrag_document_id=resolved_id,
             )
         await self._documents.save(document)
         await self._session.commit()

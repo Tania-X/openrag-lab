@@ -167,7 +167,7 @@ super_admin    传一个不存在的 tenant_id → 404
       "stored_filename": "default/40-2024-支付超时处理规范.md",
       "mimetype": "text/markdown",
       "size_bytes": 1709,
-      "openrag_document_id": "xxx",
+      "openrag_document_id": "ONjbpbZ-8UkjaTkuX_FbUV9D",
       "uploaded_by": "…",
       "created_at": "2026-09-12T…",
       "updated_at": "2026-09-12T…"
@@ -178,6 +178,10 @@ super_admin    传一个不存在的 tenant_id → 404
 
 `tenant_id` 是**可选查询参数**，只有 `super_admin` 能用（同 search/chat 的规则）。
 
+`openrag_document_id` 是 OpenRAG 侧的文档 id：入库任务本身不回传它，
+服务端在入库成功后回查一次（best effort，查不到就是 `null`），
+同名重传换了内容会刷新成新 id。
+
 ### 2.6 POST /api/documents/ingest
 
 需要权限：`documents:upload`。`multipart/form-data`，字段：
@@ -186,6 +190,14 @@ super_admin    传一个不存在的 tenant_id → 404
 file       必填（multipart），文件本体；默认上限 50 MiB，见 MAX_UPLOAD_BYTES
 tenant_id  可选（multipart 表单字段），只有 super_admin 可用
 ```
+
+接受的格式（与 CLI 入库同一份白名单，见 `domain/rag/documents.py`）：
+
+```text
+.md .txt .pdf .docx .xlsx .csv .html .htm
+```
+
+其他后缀在触达 OpenRAG 之前就被拒（400），不会送进解析器。
 
 规则：
 

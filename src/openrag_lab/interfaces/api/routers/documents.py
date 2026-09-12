@@ -85,7 +85,10 @@ async def ingest_document(
     # file *by path* from a worker thread, and an implicitly-deleting handle
     # cannot be reopened that way on every platform. The file must stay alive
     # until the ingestion task has finished, so its lifetime is explicit here.
-    descriptor, temp_name = tempfile.mkstemp(suffix=suffix)
+    # The prefix makes leftovers from a killed process recognisable; the file is
+    # removed in the finally block, and a crash window during the (bounded)
+    # ingestion wait is accepted rather than swept.
+    descriptor, temp_name = tempfile.mkstemp(prefix="openrag-upload-", suffix=suffix)
     temp_path = Path(temp_name)
     try:
         try:

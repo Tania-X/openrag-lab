@@ -192,7 +192,7 @@ def test_nothing_to_delete_uses_the_structured_error() -> None:
     already_gone = OpenRAGError(
         "OpenRAG DELETE ... -> 404",
         status_code=404,
-        payload={"success": False, "deleted_chunks": 0, "error": "No matching document"},
+        payload={"success": False, "deleted_chunks": 0, "error": "anything at all"},
     )
     removed = OpenRAGError(
         "OpenRAG DELETE ... -> 200",
@@ -200,7 +200,12 @@ def test_nothing_to_delete_uses_the_structured_error() -> None:
         payload={"success": True, "deleted_chunks": 3},
     )
     opaque = OpenRAGError("OpenRAG DELETE ... -> 500: boom")
+    routing_miss = OpenRAGError(
+        "OpenRAG DELETE ... -> 404", status_code=404, payload={"detail": "Not Found"}
+    )
 
     assert _nothing_to_delete(already_gone) is True
     assert _nothing_to_delete(removed) is False
     assert _nothing_to_delete(opaque) is False
+    # A 404 that is not the delete endpoint's "nothing matched" shape is an error.
+    assert _nothing_to_delete(routing_miss) is False

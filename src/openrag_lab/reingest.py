@@ -138,10 +138,16 @@ def delete_legacy_copies(client: OpenRAGClient, report: MigrationReport) -> Migr
 
 
 def _nothing_to_delete(exc: OpenRAGError) -> bool:
-    """True when OpenRAG reports that no chunks matched the filename."""
+    """True when OpenRAG reports that no chunks matched the filename.
+
+    Field-based on purpose: this endpoint answers a missing document with
+    ``404`` and ``success=false``/``deleted_chunks=0``, and matching the error
+    wording instead would turn a message change into a false "delete failed".
+    A 404 that does not have that shape (a routing mistake, say) stays an error.
+    """
     payload = exc.payload if isinstance(exc.payload, dict) else {}
-    if exc.status_code == 404 and int(payload.get("deleted_chunks") or 0) == 0:
-        return True
-    return payload.get("success") is False and "No matching document" in str(
-        payload.get("error") or ""
+    return (
+        exc.status_code == 404
+        and payload.get("success") is False
+        and int(payload.get("deleted_chunks") or 0) == 0
     )

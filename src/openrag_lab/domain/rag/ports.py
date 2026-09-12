@@ -58,3 +58,12 @@ class RagGateway(Protocol):
     def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
         """Remove every chunk stored under ``stored_filename``."""
         ...
+
+    def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
+        """Return the id OpenRAG assigned to ``stored_filename``, if known.
+
+        Ingestion tasks do not report it, so it has to be looked up. Best
+        effort: ``None`` when the document cannot be located (for example when
+        the listing endpoint truncates a large library).
+        """
+        ...

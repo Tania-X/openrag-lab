@@ -5,17 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from openrag_lab.client import OpenRAGClient
+from openrag_lab.domain.rag.documents import SUPPORTED_DOCUMENT_EXTENSIONS
 
-SUPPORTED_EXTENSIONS = {
-    ".md",
-    ".txt",
-    ".pdf",
-    ".docx",
-    ".xlsx",
-    ".csv",
-    ".html",
-    ".htm",
-}
+#: Backwards-compatible name; the list itself lives in the domain layer.
+SUPPORTED_EXTENSIONS = SUPPORTED_DOCUMENT_EXTENSIONS
 
 
 def _is_eval_csv(path: Path) -> bool:

@@ -60,6 +60,8 @@ class FakeDocumentGateway:
         self.task: dict[str, Any] = {"status": "completed", "failed_files": 0}
         self.error: OpenRAGError | None = None
         self.staged_path: Path | None = None
+        self.lookups: list[dict[str, Any]] = []
+        self.document_id: str | None = "orag-doc-1"
 
     def ingest_document(self, **kwargs: Any) -> dict[str, Any]:
         if self.error is not None:
@@ -77,6 +79,10 @@ class FakeDocumentGateway:
             raise self.error
         self.deleted.append(kwargs)
         return {"success": True, "deleted_chunks": 3}
+
+    def find_document_id(self, **kwargs: Any) -> str | None:
+        self.lookups.append(kwargs)
+        return self.document_id
 
 
 @asynccontextmanager
@@ -248,6 +254,9 @@ async def test_upload_stores_the_namespaced_name_and_registers_it() -> None:
         assert response.status_code == 201
         assert gateway.ingested[-1]["stored_filename"] == "acme/report.md"
         assert gateway.ingested[-1]["api_key"] == TEST_API_KEY
+        # The id is read back after ingest, since the task does not report it.
+        assert gateway.lookups[-1]["stored_filename"] == "acme/report.md"
+        assert response.json()["openrag_document_id"] == "orag-doc-1"
 
         listing = (await client.get("/api/documents")).json()
     assert response.json()["stored_filename"] == "acme/report.md"
@@ -316,7 +325,7 @@ async def test_upload_replaces_an_existing_document_instead_of_failing() -> None
 async def test_failed_ingestion_leaves_no_registry_entry() -> None:
     async with _build_client(actor=ACME_TENANT) as (client, gateway):
         gateway.task = {"status": "failed", "failed_files": 1, "error": "unsupported"}
-        response = await client.post("/api/documents/ingest", files=_upload("bad.bin"))
+        response = await client.post("/api/documents/ingest", files=_upload("bad.md"))
         listing = (await client.get("/api/documents")).json()
     assert response.status_code == 400
     assert "did not complete" in response.json()["detail"]
@@ -363,6 +372,37 @@ async def test_rejected_oversized_upload_leaves_no_temp_file(
     assert response.status_code == 413
     assert created and all(not path.exists() for path in created)
     assert gateway.ingested == []
+
+
+@pytest.mark.parametrize("name", ["payload.exe", "archive.zip", "noextension"])
+async def test_upload_rejects_unsupported_formats(name: str) -> None:
+    """The same whitelist the CLI uses; nothing reaches OpenRAG otherwise."""
+    async with _build_client(actor=ACME_TENANT) as (client, gateway):
+        response = await client.post("/api/documents/ingest", files=_upload(name))
+    assert response.status_code == 400
+    assert "Unsupported file type" in response.json()["detail"]
+    assert gateway.ingested == []
+
+
+async def test_reupload_refreshes_the_document_id() -> None:
+    """Replacing with different content changes the id OpenRAG assigns."""
+    async with _build_client(
+        actor=ACME_TENANT, documents_seed=[("t-acme", "report.md")]
+    ) as (client, gateway):
+        gateway.document_id = "orag-doc-2"
+        await client.post("/api/documents/ingest", files=_upload("report.md"))
+        listing = (await client.get("/api/documents")).json()
+    assert listing["files"][0]["openrag_document_id"] == "orag-doc-2"
+
+
+async def test_upload_tolerates_a_missing_document_id() -> None:
+    """A lookup miss must not fail the upload nor clear a known id."""
+    async with _build_client(
+        actor=ACME_TENANT, documents_seed=[("t-acme", "report.md")]
+    ) as (client, gateway):
+        gateway.document_id = None
+        response = await client.post("/api/documents/ingest", files=_upload("report.md"))
+    assert response.status_code == 201
 
 
 async def test_upload_requires_the_upload_permission() -> None:

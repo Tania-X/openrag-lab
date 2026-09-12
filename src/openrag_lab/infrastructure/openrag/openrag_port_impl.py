@@ -103,3 +103,10 @@ class OpenRAGGateway:
     def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
         with self._client(api_key) as client:
             return client.delete_document(stored_filename)
+
+    def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
+        with self._client(api_key) as client:
+            for entry in client.list_files():
+                if entry.get("filename") == stored_filename:
+                    return str(entry.get("document_id") or "") or None
+        return None
