@@ -5,8 +5,9 @@
 # 源：src/openrag_lab/api/main.py 注册的全部路由与 interfaces/schemas 的模型。
 # 一致性由 tests/test_openapi_artifact.py 保证（与代码不一致时 CI 失败）。
 #
-# 除 /api/health、/api/auth/register、/api/auth/login 外，
-# 其余操作都需要 Authorization: Bearer <token>（见下方 security）。
+# 鉴权标注是逐 operation 的（FastAPI 依依赖图生成）：
+# 除 /api/health、/api/auth/register、/api/auth/login 外，每个操作都带
+# security: [{HTTPBearer: []}]；本文件没有顶层 security 段。
 components:
   schemas:
     Body_ingest_document_api_documents_ingest_post:

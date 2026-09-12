@@ -39,6 +39,9 @@ SCHEME_NAME = "HTTPBearer"
 
 DEFAULT_OUTPUT = Path("openapi/openrag-lab.yaml")
 
+#: The hand-maintained upstream subset; read by the consistency test only.
+UPSTREAM_CONTRACT = Path("openapi/openrag.yaml")
+
 HEADER = """\
 # OpenRAG Lab 自研后端契约（OpenAPI 3.1）
 #
@@ -47,8 +50,9 @@ HEADER = """\
 # 源：src/openrag_lab/api/main.py 注册的全部路由与 interfaces/schemas 的模型。
 # 一致性由 tests/test_openapi_artifact.py 保证（与代码不一致时 CI 失败）。
 #
-# 除 /api/health、/api/auth/register、/api/auth/login 外，
-# 其余操作都需要 Authorization: Bearer <token>（见下方 security）。
+# 鉴权标注是逐 operation 的（FastAPI 依依赖图生成）：
+# 除 /api/health、/api/auth/register、/api/auth/login 外，每个操作都带
+# security: [{HTTPBearer: []}]；本文件没有顶层 security 段。
 """
 
 
@@ -69,12 +73,20 @@ def build_spec(app: Any | None = None) -> dict[str, Any]:
 
 
 def public_operations_in(spec: dict[str, Any]) -> set[tuple[str, str]]:
-    """Return the ``(METHOD, path)`` pairs the document leaves unauthenticated."""
+    """Return the ``(METHOD, path)`` pairs the document leaves unauthenticated.
+
+    Follows OpenAPI's inheritance rule: an operation's effective requirement is
+    its own ``security`` when the key is present (an empty list meaning "no auth,
+    explicitly"), otherwise the document-level default. Ignoring the top-level
+    default would call every operation public on a document that sets one.
+    """
+    default_security = spec.get("security") or []
     return {
         (method.upper(), path)
         for path, operations in spec.get("paths", {}).items()
         for method, operation in operations.items()
-        if isinstance(operation, dict) and not operation.get("security")
+        if isinstance(operation, dict)
+        and not operation.get("security", default_security)
     }
 
 
@@ -97,13 +109,15 @@ def export_openapi(output: Path = DEFAULT_OUTPUT, app: Any | None = None) -> Pat
     return output
 
 
-def documented_operations() -> dict[str, set[str]]:
-    """Read the committed upstream-subset contract as ``{path: {methods}}``.
+def documented_operations(
+    path: Path = UPSTREAM_CONTRACT,
+) -> dict[str, set[str]]:
+    """Read an OpenAPI file as ``{path: {METHODS}}``.
 
-    Used by the consistency test that checks ``openapi/openrag.yaml`` against a
-    running OpenRAG deployment.
+    Defaults to the upstream subset; the consistency test uses it to check
+    ``openapi/openrag.yaml`` against a running OpenRAG deployment.
     """
-    spec = yaml.safe_load((DEFAULT_OUTPUT.parent / "openrag.yaml").read_text("utf-8"))
+    spec = yaml.safe_load(path.read_text("utf-8"))
     return {
         path: {method.upper() for method in operations}
         for path, operations in (spec.get("paths") or {}).items()

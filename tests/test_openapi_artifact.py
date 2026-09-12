@@ -30,7 +30,14 @@ ARTIFACT = Path("openapi/openrag-lab.yaml")
 
 
 def _api_routes(routes):
-    """Yield APIRoute objects, unwrapping FastAPI's included-router wrappers."""
+    """Yield APIRoute objects, unwrapping FastAPI's included-router wrappers.
+
+    With FastAPI 0.141 ``app.include_router`` does not flatten: ``app.routes``
+    holds 8 ``_IncludedRouter`` wrappers plus the 4 built-in ``Route`` objects and
+    no top-level ``APIRoute`` at all, so the unwrap is required. It is kept
+    defensive rather than deleting it, but a future internals change must fail
+    loudly — hence the explicit check in ``authenticated_operations``.
+    """
     from fastapi.routing import APIRoute
 
     for route in routes:
@@ -58,8 +65,14 @@ def authenticated_operations(app) -> set[tuple[str, str]]:
     """
     from openrag_lab.interfaces.api.deps import get_current_user
 
+    routes = list(_api_routes(app.routes))
+    if not routes:
+        raise AssertionError(
+            "no APIRoute could be reached from app.routes: FastAPI's route "
+            "wrapping changed, so this introspection needs updating"
+        )
     found: set[tuple[str, str]] = set()
-    for route in _api_routes(app.routes):
+    for route in routes:
         if get_current_user in _dependency_calls(route.dependant):
             found.update((method.upper(), route.path) for method in route.methods)
     return found
@@ -95,6 +108,13 @@ def test_the_contract_lists_every_route_the_app_serves() -> None:
     assert set(spec["paths"]) == served
     # A sanity floor so a broken import cannot make both sides empty.
     assert len(served) >= 13
+
+
+def test_route_introspection_reaches_the_app_routes() -> None:
+    """Guards the unwrapping above: an internals change must not empty it."""
+    routes = list(_api_routes(app.routes))
+    assert len(routes) >= 13, f"only found {len(routes)} routes"
+    assert {"/api/health", "/api/search", "/api/documents"} <= {r.path for r in routes}
 
 
 def test_marking_agrees_with_the_real_dependency_graph() -> None:
