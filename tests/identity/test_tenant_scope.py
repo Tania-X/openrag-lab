@@ -142,3 +142,15 @@ def test_document_rename_enforces_display_name_length() -> None:
     document.rename("a" * MAX_DISPLAY_NAME_LENGTH)
     with pytest.raises(InvalidOperationError):
         document.rename("a" * (MAX_DISPLAY_NAME_LENGTH + 1))
+
+
+def test_document_touch_moves_updated_at_only() -> None:
+    """updated_at is a creation default, so mutations must bump it explicitly."""
+    document = _document()
+    created_at, updated_at = document.created_at, document.updated_at
+
+    document.touch()
+
+    assert document.created_at == created_at
+    assert document.updated_at > updated_at
+    assert document.display_name == "report.pdf"

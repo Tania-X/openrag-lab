@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import typer
@@ -216,6 +218,160 @@ def sync_dify_assets() -> None:
     settings = get_settings()
     sync_sample_data(settings.dify_sample_data_path, Path("data/sample-data"))
     sync_eval_sets(settings.dify_sample_data_path, settings.eval_csv.parent)
+
+
+@app.command()
+def reingest_legacy(
+    tenant: str = typer.Option("default", "--tenant", help="Tenant slug to store documents under."),  # noqa: B008
+    source: Path = typer.Option(  # noqa: B008
+        Path("data/sample-data"),
+        "--source",
+        "-s",
+        help="Directory holding the original files.",
+    ),
+    delete_legacy: bool = typer.Option(
+        False,
+        "--delete-legacy",
+        help="Delete the unprefixed copies from OpenRAG once they are re-ingested.",
+    ),
+) -> None:
+    """Re-ingest pre-namespace documents as `<tenant slug>/<filename>`.
+
+    Documents ingested before s1p3a have no tenant prefix, so no tenant's
+    search scope can reach them; this moves them into the namespace and
+    registers them.
+    """
+    asyncio.run(_reingest_legacy(tenant, source, delete_legacy))
+
+
+def _guess_mimetype(path: Path) -> str:
+    import mimetypes
+
+    return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) -> None:
+    from openrag_lab.client import OpenRAGClient
+    from openrag_lab.domain.identity.models import Document
+    from openrag_lab.domain.shared.ids import DocumentId
+    from openrag_lab.infrastructure.db.repositories.identity import (
+        SqlDocumentRepository,
+        SqlTenantRepository,
+        SqlUserRepository,
+    )
+    from openrag_lab.infrastructure.db.session import create_all, get_session
+    from openrag_lab.reingest import delete_legacy_copies, reingest_legacy_documents
+
+    settings = get_settings()
+    await create_all()
+
+    async with asynccontextmanager(get_session)() as session:
+        tenant = await SqlTenantRepository(session).find_by_slug(tenant_slug)
+        if tenant is None:
+            console.print(f"[red]Tenant not found: {tenant_slug}[/red]")
+            raise typer.Exit(code=1)
+
+        documents = SqlDocumentRepository(session)
+        users = SqlUserRepository(session)
+        uploader = await users.find_by_username(settings.bootstrap_admin_username)
+        if uploader is None:
+            # documents.uploaded_by references users.id: fall back to a real
+            # user of the tenant rather than writing a dangling id.
+            tenant_users = await users.list_by_tenant(tenant.id)
+            uploader = tenant_users[0] if tenant_users else None
+        if uploader is None:
+            console.print(
+                "[red]No user found to attribute migrated documents to. "
+                "Bootstrap the tenant (or create a user) first.[/red]"
+            )
+            raise typer.Exit(code=1)
+        uploaded_by = uploader.id
+        pending: list[Document] = []
+
+        def register(
+            stored_filename: str, display_name: str, path: Path, task: dict
+        ) -> None:
+            """Collect one registry row; written after the client is closed."""
+            pending.append(
+                Document(
+                    id=DocumentId.generate(),
+                    tenant_id=tenant.id,
+                    stored_filename=stored_filename,
+                    display_name=display_name,
+                    uploaded_by=uploaded_by,
+                    mimetype=_guess_mimetype(path),
+                    size_bytes=path.stat().st_size,
+                )
+            )
+
+        with OpenRAGClient(settings.openrag_base_url, settings.openrag_api_key) as client:
+            report = reingest_legacy_documents(
+                client,
+                tenant_slug=tenant_slug,
+                source=source,
+                register=register,
+            )
+            # Ingestion tasks do not report it, so read the ids back in one go
+            # (per file would be one listing call each).
+            document_ids = {
+                str(entry.get("filename")): str(entry.get("document_id") or "") or None
+                for entry in client.list_files()
+                if entry.get("filename")
+            }
+
+        # Persist the registry before anything destructive runs: the registry is
+        # what makes the documents reachable, so it must not depend on the
+        # cleanup step succeeding.
+        for document in pending:
+            document.openrag_document_id = document_ids.get(document.stored_filename)
+            existing = await documents.find_by_stored_filename(
+                tenant.id, document.stored_filename
+            )
+            if existing is None:
+                await documents.save(document)
+            else:
+                # Same replace semantics as the API upload path.
+                existing.size_bytes = document.size_bytes
+                existing.mimetype = document.mimetype
+                if document.openrag_document_id is not None:
+                    existing.openrag_document_id = document.openrag_document_id
+                existing.touch()
+                await documents.save(existing)
+        await session.commit()
+
+        if delete_legacy:
+            with OpenRAGClient(
+                settings.openrag_base_url, settings.openrag_api_key
+            ) as client:
+                delete_legacy_copies(client, report)
+
+    table = Table(title=f"Legacy re-ingest into {report.namespace}")
+    table.add_column("Result")
+    table.add_column("Count")
+    table.add_row("re-ingested", str(len(report.reingested)))
+    table.add_row("already namespaced", str(len(report.already_present)))
+    table.add_row("failed", str(len(report.failed)))
+    table.add_row("legacy copies removed", str(len(report.deleted_legacy)))
+    table.add_row("legacy removable", str(len(report.legacy_removable)))
+    table.add_row("legacy kept (migration failed)", str(len(report.legacy_kept)))
+    table.add_row("legacy already gone", str(len(report.already_gone)))
+    table.add_row("legacy delete failed", str(len(report.delete_failed)))
+    table.add_row("no local source", str(len(report.no_local_source)))
+    console.print(table)
+
+    for name, reason in report.failed:
+        console.print(f"[red]failed:[/red] {name}: {reason}")
+    if report.legacy_kept:
+        console.print(
+            "[yellow]Kept the legacy copy for:[/yellow] " + ", ".join(report.legacy_kept)
+        )
+    for name, reason in report.delete_failed:
+        console.print(f"[red]delete failed:[/red] {name}: {reason}")
+    if report.no_local_source:
+        console.print(
+            "[yellow]Left in place (no local file to re-ingest):[/yellow] "
+            + ", ".join(report.no_local_source)
+        )
 
 
 if __name__ == "__main__":

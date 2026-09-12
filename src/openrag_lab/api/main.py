@@ -19,11 +19,13 @@ from openrag_lab.interfaces.api.errors import register_exception_handlers
 from openrag_lab.interfaces.api.routers import (
     auth,
     chat,
+    documents,
     roles,
     search,
     tenants,
     users,
 )
+from openrag_lab.interfaces.api.uploads import sweep_stale_uploads
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,10 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "Refusing to start in production with a default or short bootstrap admin password"
             )
+
+    swept = sweep_stale_uploads(settings.upload_ingest_timeout_seconds)
+    if swept:
+        logger.warning("Removed %d stale upload staging file(s) from a previous run", swept)
 
     engine = init_db(settings.database_url)
     try:
@@ -94,6 +100,7 @@ app.include_router(users.router)
 app.include_router(tenants.router)
 app.include_router(roles.router)
 
-# RAG: tenant-scoped search & chat (s1p3b)
+# RAG: tenant-scoped search, chat and documents (s1p3b, s1p3c)
 app.include_router(search.router)
 app.include_router(chat.router)
+app.include_router(documents.router)

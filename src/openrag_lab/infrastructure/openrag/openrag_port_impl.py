@@ -8,6 +8,7 @@ filters. Keeping it here means the application layer never touches httpx.
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from openrag_lab.client import OpenRAGClient
@@ -21,19 +22,30 @@ class OpenRAGGateway:
         self,
         client_factory: Callable[..., OpenRAGClient] = OpenRAGClient,
         base_url: str | None = None,
+        ingest_timeout: float | None = None,
     ) -> None:
         self._client_factory = client_factory
         self._base_url = base_url
+        self._ingest_timeout = ingest_timeout
 
     def _client(self, api_key: str) -> OpenRAGClient:
         """Build a client for one tenant.
 
         The address is passed explicitly rather than left to the client's own
         defaulting, so the gateway always targets the configured OpenRAG
-        instance even if that defaulting changes.
+        instance even if that defaulting changes. The ingestion timeout is set
+        here too: it decides how long a request thread can be held.
         """
-        base_url = self._base_url or get_settings().openrag_base_url
-        return self._client_factory(base_url=base_url, api_key=api_key)
+        settings = get_settings()
+        base_url = self._base_url or settings.openrag_base_url
+        timeout = (
+            self._ingest_timeout
+            if self._ingest_timeout is not None
+            else settings.upload_ingest_timeout_seconds
+        )
+        return self._client_factory(
+            base_url=base_url, api_key=api_key, ingest_timeout=timeout
+        )
 
     def search(
         self,
@@ -74,3 +86,27 @@ class OpenRAGGateway:
                 limit=limit,
                 score_threshold=score_threshold,
             )
+
+    def ingest_document(
+        self,
+        *,
+        api_key: str,
+        stored_filename: str,
+        path: Path,
+    ) -> dict[str, Any]:
+        with self._client(api_key) as client:
+            # wait=True: the caller only registers the document once OpenRAG
+            # reports the task finished, so the registry never claims a
+            # document that failed to index.
+            return client.ingest_file(path, wait=True, filename=stored_filename)
+
+    def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
+        with self._client(api_key) as client:
+            return client.delete_document(stored_filename)
+
+    def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
+        with self._client(api_key) as client:
+            for entry in client.list_files():
+                if entry.get("filename") == stored_filename:
+                    return str(entry.get("document_id") or "") or None
+        return None

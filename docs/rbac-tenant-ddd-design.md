@@ -511,13 +511,20 @@ application/rag/retrieval_scope.py
 
 这条是 D1 方案成立的前提：命名空间是文件名前缀，而不是自定义 metadata。
 
-### 11.4 存量文档
+### 11.4 存量文档（s1p3c 已实现）
 
-Phase 1 之前入库的文档没有命名空间前缀，且 owner 属于共享账号。
-处理方式（s1p3c 负责）：
+Phase 1 之前入库的文档没有命名空间前缀，任何租户的检索边界都覆盖不到它们。
+处理方式：
+
+```bash
+openrag-lab reingest-legacy --tenant default --source data/sample-data --delete-legacy
+```
 
 ```text
-把这些文档按 `<slug>/<原文件名>` 重新入库，登记到对应租户
+1. 按 `<slug>/<原文件名>` 重新入库（源文件缺失的会单独列出，不动）
+2. 成功的写入登记表（重跑幂等：已带前缀的只补登记）
+3. --delete-legacy 只删除「重新入库确实成功」的旧副本；
+   入库失败的文件保留旧副本，避免丢数据
 ```
 
 不在 Domain 里为「无前缀」开特例：命名空间规则保持唯一。
@@ -828,8 +835,9 @@ src/openrag_lab/
 │   │       ├── roles.py
 │   │       ├── search.py          # s1p3b：已迁入（原 api/routers/search.py 删除）
 │   │       ├── chat.py            # s1p3b：已迁入（原 api/routers/chat.py 删除）
-│   │       └── documents.py       # s1p3c（原无鉴权的 api/routers/documents.py 已删除）
+│   │       └── documents.py       # s1p3c：list / ingest / delete（原无鉴权版本已删除）
 │   └── schemas/
+├── reingest.py                    # 存量文档迁移（CLI reingest-legacy 调用）
 └── cli.py
 ```
 
@@ -837,7 +845,6 @@ src/openrag_lab/
 
 ```text
 - 顶层 client.py 与 api/main.py 仍在旧位置（api/routers/ 现只剩 health.py）
-- s1p3c 会把 documents 路由写进 interfaces/api/routers/ 并接上登记表
 ```
 
 **前端影响**：`/api/search`、`/api/chat`、`/api/documents` 现在都要求登录态，
@@ -873,7 +880,7 @@ s1p1  DDD 骨架 + 数据模型 + Repository    ✅
 s1p2  Auth / User / Tenant / RBAC API     ✅
 s1p3a 租户文档作用域（命名空间 + 登记表）  ✅
 s1p3b Search / Chat 接 RBAC + 租户过滤     ✅
-s1p3c Documents 接 RBAC + 命名空间 + 登记表
+s1p3c Documents 接 RBAC + 命名空间 + 登记表 ✅
 ```
 
 - SQLAlchemy async + SQLite

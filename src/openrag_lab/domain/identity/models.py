@@ -22,6 +22,40 @@ MAX_STORED_FILENAME_LENGTH = 512
 MAX_DISPLAY_NAME_LENGTH = 512
 
 
+def scoped_filename(namespace: str, filename: str) -> str:
+    """Return ``namespace + filename`` after validating the name.
+
+    The one implementation of the storage-name rule. ``Tenant.scope_filename``
+    delegates here, and callers that have a namespace but no ``Tenant`` (the
+    legacy-document migration, for example) use it directly, so the rule cannot
+    drift between the upload path and tooling.
+
+    Only a plain filename is accepted: path separators, a leading dot and
+    surrounding spaces are rejected rather than normalised away, because
+    ``a/b.pdf`` and ``b.pdf`` must never collapse into one stored name.
+
+    Callers that receive a client-supplied path (the multipart ``filename`` of
+    an upload, which some browsers send as ``C:\\fakepath\\report.pdf``) must
+    reduce it to a basename at the boundary before calling this.
+    """
+    cleaned = filename.strip()
+    if (
+        not cleaned
+        or cleaned != filename
+        or cleaned.startswith(".")
+        or "/" in cleaned
+        or "\\" in cleaned
+    ):
+        raise InvalidOperationError(f"Invalid document filename: {filename!r}")
+    stored = f"{namespace}{cleaned}"
+    if len(stored) > MAX_STORED_FILENAME_LENGTH:
+        raise InvalidOperationError(
+            f"Document filename is too long ({len(stored)} > "
+            f"{MAX_STORED_FILENAME_LENGTH}): {filename!r}"
+        )
+    return stored
+
+
 @dataclass(slots=True)
 class Permission:
     """A single permission such as ``search:use``."""
@@ -111,32 +145,10 @@ class Tenant:
     def scope_filename(self, filename: str) -> str:
         """Return the namespaced filename used to store ``filename`` in OpenRAG.
 
-        Only a plain filename is accepted: any path separator, a leading dot or
-        a surrounding-space variant is rejected instead of being normalised
-        away, so a stored name can never be ambiguous about which tenant it
-        belongs to (``a/b.pdf`` and ``b.pdf`` must not collapse into one entry).
-
-        Callers that receive a client-supplied path (for example the multipart
-        ``filename`` of an upload, which some browsers send as
-        ``C:\\fakepath\\report.pdf``) must reduce it to a basename at the API
-        boundary before calling this method.
+        The rule itself lives in :func:`scoped_filename` so tooling without a
+        ``Tenant`` enforces exactly the same constraints.
         """
-        cleaned = filename.strip()
-        if (
-            not cleaned
-            or cleaned != filename
-            or cleaned.startswith(".")
-            or "/" in cleaned
-            or "\\" in cleaned
-        ):
-            raise InvalidOperationError(f"Invalid document filename: {filename!r}")
-        stored = f"{self.document_namespace}{cleaned}"
-        if len(stored) > MAX_STORED_FILENAME_LENGTH:
-            raise InvalidOperationError(
-                f"Document filename is too long ({len(stored)} > "
-                f"{MAX_STORED_FILENAME_LENGTH}): {filename!r}"
-            )
-        return stored
+        return scoped_filename(self.document_namespace, filename)
 
     def activate(self) -> None:
         if self.status is TenantStatus.ACTIVE:
@@ -237,6 +249,14 @@ class Document:
     openrag_document_id: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+
+    def touch(self) -> None:
+        """Mark the document as modified.
+
+        ``updated_at`` is a creation-time default, so any mutation has to bump
+        it explicitly — the repository persists whatever the entity carries.
+        """
+        self.updated_at = datetime.now(UTC)
 
     def rename(self, display_name: str) -> None:
         """Change the user-facing name.
