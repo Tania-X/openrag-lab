@@ -17,14 +17,19 @@ from typing import Any
 
 import yaml
 
-#: Operations that intentionally need no bearer token (docs/api-contract.md 2.1).
-#: Everything else is documented as requiring HTTPBearer; a new public endpoint
-#: has to be added here, which makes that choice visible in review.
+#: ``(METHOD, path)`` pairs that intentionally need no bearer token
+#: (docs/api-contract.md 2.1). Everything else is documented as requiring
+#: HTTPBearer.
+#:
+#: Per *operation*, not per path: declaring a path public would leave every
+#: other method on that path unmarked too, so an endpoint that mixes a public
+#: and a protected method could be documented as public by accident.
+#: Both the generator and tests/test_openapi_artifact.py use this one set.
 PUBLIC_OPERATIONS = frozenset(
     {
-        "/api/health",
-        "/api/auth/register",
-        "/api/auth/login",
+        ("GET", "/api/health"),
+        ("POST", "/api/auth/register"),
+        ("POST", "/api/auth/login"),
     }
 )
 
@@ -60,12 +65,27 @@ def build_spec(app: Any | None = None) -> dict[str, Any]:
         return spec
 
     for path, operations in spec.get("paths", {}).items():
-        if path in PUBLIC_OPERATIONS:
-            continue
-        for operation in operations.values():
-            if isinstance(operation, dict):
-                operation.setdefault("security", [{SCHEME_NAME: []}])
+        for method, operation in operations.items():
+            if not isinstance(operation, dict):
+                continue
+            if (method.upper(), path) in PUBLIC_OPERATIONS:
+                continue
+            # Keep a deliberate declaration (a non-empty security list), but fill
+            # in anything missing or explicitly empty: an empty list means
+            # "no auth required", which is not what these operations mean.
+            if not operation.get("security"):
+                operation["security"] = [{SCHEME_NAME: []}]
     return spec
+
+
+def public_operations_in(spec: dict[str, Any]) -> set[tuple[str, str]]:
+    """Return the ``(METHOD, path)`` pairs the document leaves unauthenticated."""
+    return {
+        (method.upper(), path)
+        for path, operations in spec.get("paths", {}).items()
+        for method, operation in operations.items()
+        if isinstance(operation, dict) and not operation.get("security")
+    }
 
 
 def render_yaml(spec: dict[str, Any]) -> str:

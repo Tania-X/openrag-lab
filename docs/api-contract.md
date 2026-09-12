@@ -379,7 +379,9 @@ OpenRAG 原生 Chat 接口。
 
   源是 `api/main.py` 注册的全部路由 + `interfaces/schemas` 的模型；
   除 `/api/health`、`/api/auth/register`、`/api/auth/login` 外，所有操作都标注
-  `security: [{HTTPBearer: []}]`（公开端点在 `openapi_export.PUBLIC_OPERATIONS` 里显式声明）。
+  `security: [{HTTPBearer: []}]`。公开面在 `openapi_export.PUBLIC_OPERATIONS` 里显式声明，
+  粒度是 **(METHOD, path)** 而不是 path——否则同一条路径上「一个公开方法 + 一个受保护方法」
+  会把后者也标成公开；已有专门用例验证这一点。
   `tests/test_openapi_artifact.py` 会重新生成并比对，**契约与代码不一致时 CI 直接失败**——
   这是为了避免它再次变成"手工维护然后悄悄过期"（曾出现只列 4 条路由、而实际有 13 条的阶段）。
 
