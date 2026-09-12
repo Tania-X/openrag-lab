@@ -32,6 +32,7 @@ from openrag_lab.infrastructure.db.repositories.identity import (
 )
 from openrag_lab.infrastructure.db.seed import seed_identity
 from openrag_lab.infrastructure.db.session import get_session
+from openrag_lab.infrastructure.security.jwt import create_access_token
 from openrag_lab.interfaces.api.deps import CurrentUser, get_current_user, get_rag_gateway
 from openrag_lab.interfaces.api.errors import register_exception_handlers
 from openrag_lab.interfaces.api.routers import chat, search
@@ -356,3 +357,73 @@ async def test_invalid_search_payloads_are_rejected(payload: dict[str, Any]) -> 
     async with _build_client(actor=ACME_USER) as (client, _):
         response = await client.post("/api/search", json=payload)
     assert response.status_code == 422
+
+
+async def test_unknown_tenant_id_is_not_found_not_a_server_error() -> None:
+    """A malformed tenant id is just an unknown tenant: 404, never 500."""
+    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
+    async with _build_client(actor=root) as (client, _):
+        response = await client.post(
+            "/api/search", json={"query": "报表", "tenant_id": "not-a-uuid"}
+        )
+    assert response.status_code == 404
+
+
+async def test_malformed_tenant_id_from_a_non_super_admin_is_403() -> None:
+    """Authorisation is decided before the tenant lookup, malformed or not."""
+    async with _build_client(actor=ACME_USER) as (client, _):
+        response = await client.post(
+            "/api/search", json={"query": "报表", "tenant_id": "not-a-uuid"}
+        )
+    assert response.status_code == 403
+
+
+async def test_disabled_actor_tenant_blocks_cross_tenant_super_admin() -> None:
+    """A disabled tenant stops its users, including a global super_admin.
+
+    This one deliberately does *not* override ``get_current_user``: the rule
+    lives in that dependency, so the test has to go through it with a real
+    token to prove the check is reachable.
+    """
+    token = create_access_token(user_id="u-root", tenant_id="t-acme", username="root")
+    async with _build_client(
+        actor=None, tenant_status=TenantStatus.DISABLED
+    ) as (client, gateway):
+        response = await client.post(
+            "/api/search",
+            json={"query": "报表", "tenant_id": "t-globex"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 403
+    assert gateway.calls == []
+
+
+async def test_active_tenant_super_admin_can_still_cross() -> None:
+    """Control for the test above: same token, active tenant, request succeeds."""
+    token = create_access_token(user_id="u-root", tenant_id="t-acme", username="root")
+    async with _build_client(actor=None) as (client, gateway):
+        response = await client.post(
+            "/api/search",
+            json={"query": "报表", "tenant_id": "t-globex"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["scope"]["cross_tenant"] is True
+    assert gateway.calls
+
+
+async def test_a_scope_larger_than_the_limit_is_refused_explicitly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail loudly here rather than sending an oversized body and 502-ing."""
+    from openrag_lab.application.rag import retrieval_scope
+
+    monkeypatch.setattr(retrieval_scope, "MAX_SCOPED_DOCUMENTS", 1)
+    async with _build_client(
+        actor=ACME_USER,
+        documents=[("t-acme", "one.md"), ("t-acme", "two.md")],
+    ) as (client, gateway):
+        response = await client.post("/api/search", json={"query": "报表"})
+    assert response.status_code == 400
+    assert "scoping limit" in response.json()["detail"]
+    assert gateway.calls == []

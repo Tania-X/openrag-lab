@@ -462,6 +462,14 @@ filters.data_sources = ["<具体文件名>"]   → 精确命中
 - 请求里的文件名列表随租户文档数增长，Phase 1 量级可接受；
   后续可改用 knowledge filter（`filter_id`）承载
 
+文档数上限的落地方式（s1p3b）：
+
+```text
+SCOPED_DOCUMENT_WARN_THRESHOLD = 500   超过记 warning 日志
+MAX_SCOPED_DOCUMENTS           = 5000  超过返回 400 并说明是作用域上限，
+                                        而不是把超大请求体发给 OpenRAG 换回不明所以的 502
+```
+
 ### 11.3.1 s1p3b 必须遵守的 fail-closed 规则
 
 实测（当前部署，2026-09-11）：

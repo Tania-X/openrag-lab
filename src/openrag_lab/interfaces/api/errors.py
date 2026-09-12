@@ -32,6 +32,11 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(DomainError)
     async def _domain_error(request, exc: DomainError) -> JSONResponse:
+        # Most subclasses mean "the request cannot be honoured as asked", which
+        # is a 400. Some can also come from server-side state (a corrupt tenant
+        # row, an over-large scope), so log every one — otherwise such a failure
+        # is indistinguishable from a caller mistake.
+        logger.warning("Domain error on %s: %s", request.url.path, exc)
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     @app.exception_handler(ConfigurationError)

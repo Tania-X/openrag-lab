@@ -13,6 +13,7 @@ boundary is decided here rather than by the caller:
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from openrag_lab.application.identity.rbac_service import RbacService
 from openrag_lab.domain.shared.enums import TenantStatus
 from openrag_lab.domain.shared.errors import (
+    InvalidOperationError,
     NotFoundError,
     PermissionDeniedError,
 )
@@ -29,6 +31,17 @@ from openrag_lab.infrastructure.db.repositories.identity import (
     SqlTenantRepository,
 )
 from openrag_lab.infrastructure.openrag.tenant_scope import resolve_tenant_scope
+
+logger = logging.getLogger(__name__)
+
+#: Above this many registered documents a request carries a large filename list;
+#: worth an operator-visible warning before it turns into a failure.
+SCOPED_DOCUMENT_WARN_THRESHOLD = 500
+
+#: Hard ceiling: past this the request is refused here instead of being sent and
+#: failing opaquely, because the boundary *is* the filename list and Phase 1 has
+#: no bounded alternative (a saved knowledge filter is the fix).
+MAX_SCOPED_DOCUMENTS = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +111,18 @@ class RetrievalScopeResolver:
 
         scope = resolve_tenant_scope(tenant)
         filenames = await self._document_repo.list_stored_filenames(tenant.id)
+        if len(filenames) > MAX_SCOPED_DOCUMENTS:
+            raise InvalidOperationError(
+                f"Tenant {tenant.slug} has {len(filenames)} documents, which exceeds "
+                f"the scoping limit of {MAX_SCOPED_DOCUMENTS}"
+            )
+        if len(filenames) > SCOPED_DOCUMENT_WARN_THRESHOLD:
+            logger.warning(
+                "Large tenant scope: tenant=%s documents=%d (the search body grows "
+                "with the filename count)",
+                tenant.slug,
+                len(filenames),
+            )
         return RetrievalScope(
             tenant_id=scope.tenant_id,
             document_namespace=scope.document_namespace,

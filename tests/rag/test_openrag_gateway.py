@@ -7,6 +7,7 @@ These tests cover that layer with a fake *client*.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -46,7 +47,9 @@ class FakeClient:
 
 
 @pytest.fixture(autouse=True)
-def _reset_instances() -> None:
+def _reset_instances() -> Iterator[None]:
+    """Clear the shared instance list *after* each test, not before it."""
+    yield
     FakeClient.instances = []
 
 
