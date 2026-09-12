@@ -11,16 +11,29 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
-from openrag_lab.domain.shared.enums import UserStatus
+from openrag_lab.domain.rag.ports import RagGateway
+from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.domain.shared.errors import PermissionDeniedError
 from openrag_lab.domain.shared.ids import UserId
-from openrag_lab.infrastructure.db.repositories.identity import SqlUserRepository
+from openrag_lab.infrastructure.db.repositories.identity import (
+    SqlTenantRepository,
+    SqlUserRepository,
+)
 from openrag_lab.infrastructure.db.session import get_session
+from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
 from openrag_lab.infrastructure.security.jwt import decode_access_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
+
+
+def get_rag_gateway() -> RagGateway:
+    """Provide the OpenRAG gateway (overridden in tests)."""
+    return OpenRAGGateway()
+
+
+RagGatewayDep = Annotated[RagGateway, Depends(get_rag_gateway)]
 
 
 class CurrentUser:
@@ -60,6 +73,19 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     if user.status != UserStatus.ACTIVE:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is disabled")
+
+    # A disabled tenant means nobody acts on its behalf — including a global
+    # super_admin who happens to belong to it (otherwise that account could
+    # keep reading other tenants' documents after its tenant was switched off).
+    # This is the single place that establishes "who is acting", so every
+    # protected endpoint inherits the rule.
+    tenant = await SqlTenantRepository(session).find_by_id(user.tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant not found")
+    if tenant.status is not TenantStatus.ACTIVE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Tenant is disabled"
+        )
 
     return CurrentUser(
         user_id=user.id.value,

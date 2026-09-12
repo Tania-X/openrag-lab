@@ -7,17 +7,23 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from openrag_lab.api.routers import chat, documents, health, search
+from openrag_lab.api.routers import health
 from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.config import get_settings
-from openrag_lab.domain.shared.errors import DomainError, NotFoundError
 from openrag_lab.infrastructure.db.integrity import find_tenants_with_invalid_slug
 from openrag_lab.infrastructure.db.seed import seed_identity
 from openrag_lab.infrastructure.db.session import create_all, init_db, reset_db
-from openrag_lab.interfaces.api.routers import auth, roles, tenants, users
+from openrag_lab.interfaces.api.errors import register_exception_handlers
+from openrag_lab.interfaces.api.routers import (
+    auth,
+    chat,
+    roles,
+    search,
+    tenants,
+    users,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,16 +73,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="OpenRAG Lab API", version="0.1.0", lifespan=lifespan)
-
-
-@app.exception_handler(NotFoundError)
-async def _not_found_handler(request, exc: NotFoundError) -> JSONResponse:
-    return JSONResponse(status_code=404, content={"detail": str(exc)})
-
-
-@app.exception_handler(DomainError)
-async def _domain_error_handler(request, exc: DomainError) -> JSONResponse:
-    return JSONResponse(status_code=400, content={"detail": str(exc)})
+register_exception_handlers(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -90,12 +87,13 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-app.include_router(search.router)
-app.include_router(chat.router)
-app.include_router(documents.router)
 
 # Identity & Access (s1p2)
 app.include_router(auth.router)
 app.include_router(users.router)
 app.include_router(tenants.router)
 app.include_router(roles.router)
+
+# RAG: tenant-scoped search & chat (s1p3b)
+app.include_router(search.router)
+app.include_router(chat.router)

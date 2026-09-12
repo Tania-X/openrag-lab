@@ -34,7 +34,40 @@ OpenSearch / Langflow / new-api
 }
 ```
 
-- 认证：自研后端当前阶段未强制认证（本地开发）；后续如加入用户体系，统一通过 `Authorization: Bearer <token>`。
+- 认证（s1p2 起）：除 `/api/health`、`/api/auth/register`、`/api/auth/login` 外，
+  所有接口都要求 `Authorization: Bearer <token>`，并且按 RBAC 校验权限。
+- 状态码约定：
+
+```text
+401 未登录 / token 无效
+403 权限不足、跨租户（非 super_admin）、租户被禁用
+404 目标租户不存在
+400 请求无法按原样满足（含租户文档数超过检索作用域上限）
+422 请求体不合法（含传了不接受字段，如 filters）
+502 调用 OpenRAG 失败
+503 服务端配置缺失（例如未配置 OPENRAG_API_KEY）
+```
+
+- 「租户被禁用」对所有需要认证的接口都成立：调用者自己所属租户被禁用时，
+  即使它是全局 `super_admin` 也不能继续跨租户读取（校验在建立身份的
+  `get_current_user` 里完成，所有受保护接口共用）。
+- **租户边界由服务端决定**：`/api/search`、`/api/chat` 不接受客户端传 `filters`，
+  服务端按调用者租户的登记文档生成 `data_sources` 过滤；
+  响应里的 `scope` 回显本次实际边界，便于前端展示与审计。
+- 租户文档数上限：`data_sources` 就是该租户的登记文件名列表，
+  超过 `MAX_SCOPED_DOCUMENTS`（当前 5000）时返回 400 并说明原因，
+  而不是把超大请求体发给 OpenRAG 换回一个不明所以的 502；
+  超过 500 条时服务端记 warning 日志。
+- 错误顺序约定（`/api/search`、`/api/chat`）：跨租户请求**先判「能不能跨」，再看租户是否存在**。
+
+```text
+非 super_admin 传一个不存在的 tenant_id → 403（而不是 404）
+super_admin    传一个不存在的 tenant_id → 404
+```
+
+  这是刻意选择：不向「本来就无权跨租户」的调用者暴露任意租户是否存在（避免租户存在性探测）。
+  例外：`POST /api/users` 沿用 s1p2 的顺序（先查租户 → 404，再判跨租户 → 403），
+  两处差异留待后续阶段统一。
 - 注意：OpenRAG 外部服务认证是独立的一层，必须携带 `X-API-Key`，见第 3 节。
 
 ### 2.2 GET /api/health
@@ -51,7 +84,7 @@ OpenSearch / Langflow / new-api
 
 ### 2.3 POST /api/search
 
-调用 OpenRAG 检索，并透传 rerank 等参数。
+需要权限：`search:use`。返回调用者租户范围内的检索结果。
 
 请求：
 
@@ -63,11 +96,12 @@ OpenSearch / Langflow / new-api
   "rerank": true,
   "rerank_model": "BAAI/bge-reranker-v2-m3",
   "rerank_top_n": 10,
-  "filters": {
-    "data_sources": ["40-2024-支付超时处理规范.md"]
-  }
+  "tenant_id": null
 }
 ```
+
+- 不接受 `filters`：传了直接 422（避免调用方误以为自己的过滤生效）
+- `tenant_id` 只有 `super_admin` 可传；不传时一律限定调用者自己的租户
 
 响应：
 
@@ -75,19 +109,24 @@ OpenSearch / Langflow / new-api
 {
   "results": [
     {
-      "filename": "40-2024-支付超时处理规范.md",
+      "filename": "acme/40-2024-支付超时处理规范.md",
       "text": "...",
       "score": 0.99,
       "page": 0,
       "mimetype": "text/markdown"
     }
-  ]
+  ],
+  "scope": {
+    "tenant_id": "8c309296-19d3-46f0-b61f-0fa42e0e5b14",
+    "document_count": 1,
+    "cross_tenant": false
+  }
 }
 ```
 
 ### 2.4 POST /api/chat
 
-调用 OpenRAG Chat。
+需要权限：`chat:use`。与 search 同一套租户边界。
 
 请求：
 
@@ -96,9 +135,7 @@ OpenSearch / Langflow / new-api
   "message": "2024 年支付网关读超时是多少？",
   "limit": 10,
   "score_threshold": 0,
-  "filters": {
-    "data_sources": ["40-2024-支付超时处理规范.md"]
-  }
+  "tenant_id": null
 }
 ```
 
@@ -107,27 +144,31 @@ OpenSearch / Langflow / new-api
 ```json
 {
   "response": "2024 年支付网关读超时为 5 秒。",
-  "chat_id": "1e794331-3555-479b-84c5-0ef7ece6149a",
-  "sources": []
+  "scope": {
+    "tenant_id": "8c309296-19d3-46f0-b61f-0fa42e0e5b14",
+    "document_count": 1,
+    "cross_tenant": false
+  }
 }
 ```
 
-### 2.5 GET /api/documents
+### 2.5 GET /api/documents（s1p3b 已下线，s1p3c 以鉴权版回归）
 
-获取当前 OpenRAG 知识库文件列表。
+原实现无鉴权、直接返回全库文件名（泄露所有租户的文件清单），
+已在 s1p3b 中**移除**。
 
-响应：
+s1p3c 会以新契约回归：需要 `documents:read`，并且只返回调用者租户登记过的文档：
 
 ```json
 {
-  "total": 58,
+  "total": 1,
   "files": [
     {
-      "filename": "40-2024-支付超时处理规范.md",
-      "document_id": "xxx",
+      "display_name": "40-2024-支付超时处理规范.md",
+      "stored_filename": "acme/40-2024-支付超时处理规范.md",
       "mimetype": "text/markdown",
-      "chunk_count": 3,
-      "embedding_model": "BAAI/bge-m3"
+      "size_bytes": 1709,
+      "openrag_document_id": "xxx"
     }
   ]
 }
