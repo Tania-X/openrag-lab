@@ -1,201 +1,821 @@
-openapi: 3.0.3
+# OpenRAG Lab 自研后端契约（OpenAPI 3.1）
+#
+# 本文件由代码生成，请勿手工修改：
+#   openrag-lab export-openapi
+# 源：src/openrag_lab/api/main.py 注册的全部路由与 interfaces/schemas 的模型。
+# 一致性由 tests/test_openapi_artifact.py 保证（与代码不一致时 CI 失败）。
+#
+# 除 /api/health、/api/auth/register、/api/auth/login 外，
+# 其余操作都需要 Authorization: Bearer <token>（见下方 security）。
+components:
+  schemas:
+    Body_ingest_document_api_documents_ingest_post:
+      properties:
+        file:
+          contentMediaType: application/octet-stream
+          title: File
+          type: string
+        tenant_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Id
+      required:
+      - file
+      title: Body_ingest_document_api_documents_ingest_post
+      type: object
+    ChatOut:
+      properties:
+        response:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Response
+        scope:
+          $ref: '#/components/schemas/SearchScopeOut'
+      required:
+      - scope
+      title: ChatOut
+      type: object
+    ChatRequest:
+      additionalProperties: false
+      properties:
+        limit:
+          default: 10
+          maximum: 50.0
+          minimum: 1.0
+          title: Limit
+          type: integer
+        message:
+          maxLength: 4000
+          minLength: 1
+          title: Message
+          type: string
+        score_threshold:
+          default: 0.0
+          maximum: 1.0
+          minimum: 0.0
+          title: Score Threshold
+          type: number
+        tenant_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Id
+      required:
+      - message
+      title: ChatRequest
+      type: object
+    CreateUserRequest:
+      properties:
+        display_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Display Name
+        password:
+          maxLength: 255
+          minLength: 8
+          title: Password
+          type: string
+        role:
+          $ref: '#/components/schemas/TenantRoleName'
+          default: user
+        tenant_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Id
+        username:
+          maxLength: 255
+          minLength: 1
+          title: Username
+          type: string
+      required:
+      - username
+      - password
+      title: CreateUserRequest
+      type: object
+    DeleteDocumentOut:
+      properties:
+        deleted_chunks:
+          title: Deleted Chunks
+          type: integer
+        filename:
+          title: Filename
+          type: string
+        stored_filename:
+          title: Stored Filename
+          type: string
+      required:
+      - filename
+      - stored_filename
+      - deleted_chunks
+      title: DeleteDocumentOut
+      type: object
+    DocumentListOut:
+      properties:
+        files:
+          items:
+            $ref: '#/components/schemas/DocumentOut'
+          title: Files
+          type: array
+        total:
+          title: Total
+          type: integer
+      required:
+      - total
+      - files
+      title: DocumentListOut
+      type: object
+    DocumentOut:
+      properties:
+        created_at:
+          title: Created At
+          type: string
+        display_name:
+          title: Display Name
+          type: string
+        id:
+          title: Id
+          type: string
+        mimetype:
+          title: Mimetype
+          type: string
+        openrag_document_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Openrag Document Id
+        size_bytes:
+          title: Size Bytes
+          type: integer
+        stored_filename:
+          title: Stored Filename
+          type: string
+        updated_at:
+          title: Updated At
+          type: string
+        uploaded_by:
+          title: Uploaded By
+          type: string
+      required:
+      - id
+      - display_name
+      - stored_filename
+      - mimetype
+      - size_bytes
+      - uploaded_by
+      - created_at
+      - updated_at
+      title: DocumentOut
+      type: object
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          title: Detail
+          type: array
+      title: HTTPValidationError
+      type: object
+    LoginRequest:
+      properties:
+        password:
+          title: Password
+          type: string
+        username:
+          title: Username
+          type: string
+      required:
+      - username
+      - password
+      title: LoginRequest
+      type: object
+    MeResponse:
+      properties:
+        display_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Display Name
+        permissions:
+          items:
+            type: string
+          title: Permissions
+          type: array
+        tenant_id:
+          title: Tenant Id
+          type: string
+        user_id:
+          title: User Id
+          type: string
+        username:
+          title: Username
+          type: string
+      required:
+      - user_id
+      - tenant_id
+      - username
+      - permissions
+      title: MeResponse
+      type: object
+    PermissionOut:
+      properties:
+        action:
+          title: Action
+          type: string
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        resource:
+          title: Resource
+          type: string
+      required:
+      - id
+      - resource
+      - action
+      - name
+      title: PermissionOut
+      type: object
+    RegisterRequest:
+      properties:
+        display_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Display Name
+        password:
+          maxLength: 255
+          minLength: 8
+          title: Password
+          type: string
+        tenant_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Name
+        username:
+          maxLength: 255
+          minLength: 1
+          title: Username
+          type: string
+      required:
+      - username
+      - password
+      title: RegisterRequest
+      type: object
+    RoleOut:
+      properties:
+        description:
+          title: Description
+          type: string
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        permissions:
+          items:
+            type: string
+          title: Permissions
+          type: array
+      required:
+      - id
+      - name
+      - description
+      - permissions
+      title: RoleOut
+      type: object
+    SearchOut:
+      properties:
+        results:
+          items:
+            additionalProperties: true
+            type: object
+          title: Results
+          type: array
+        scope:
+          $ref: '#/components/schemas/SearchScopeOut'
+      required:
+      - results
+      - scope
+      title: SearchOut
+      type: object
+    SearchRequest:
+      additionalProperties: false
+      properties:
+        limit:
+          default: 10
+          maximum: 50.0
+          minimum: 1.0
+          title: Limit
+          type: integer
+        query:
+          maxLength: 2000
+          minLength: 1
+          title: Query
+          type: string
+        rerank:
+          default: false
+          title: Rerank
+          type: boolean
+        rerank_model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Rerank Model
+        rerank_top_n:
+          anyOf:
+          - maximum: 100.0
+            minimum: 1.0
+            type: integer
+          - type: 'null'
+          title: Rerank Top N
+        score_threshold:
+          default: 0.0
+          maximum: 1.0
+          minimum: 0.0
+          title: Score Threshold
+          type: number
+        tenant_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Id
+      required:
+      - query
+      title: SearchRequest
+      type: object
+    SearchScopeOut:
+      properties:
+        cross_tenant:
+          title: Cross Tenant
+          type: boolean
+        document_count:
+          title: Document Count
+          type: integer
+        tenant_id:
+          title: Tenant Id
+          type: string
+      required:
+      - tenant_id
+      - document_count
+      - cross_tenant
+      title: SearchScopeOut
+      type: object
+    TenantResponse:
+      properties:
+        id:
+          title: Id
+          type: string
+        name:
+          title: Name
+          type: string
+        slug:
+          title: Slug
+          type: string
+        status:
+          title: Status
+          type: string
+      required:
+      - id
+      - name
+      - slug
+      - status
+      title: TenantResponse
+      type: object
+    TenantRoleName:
+      enum:
+      - tenant_admin
+      - developer
+      - user
+      - viewer
+      title: TenantRoleName
+      type: string
+    TokenResponse:
+      properties:
+        access_token:
+          title: Access Token
+          type: string
+        tenant_id:
+          title: Tenant Id
+          type: string
+        token_type:
+          default: bearer
+          title: Token Type
+          type: string
+        user_id:
+          title: User Id
+          type: string
+        username:
+          title: Username
+          type: string
+      required:
+      - access_token
+      - user_id
+      - tenant_id
+      - username
+      title: TokenResponse
+      type: object
+    UserResponse:
+      properties:
+        display_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Display Name
+        id:
+          title: Id
+          type: string
+        status:
+          title: Status
+          type: string
+        tenant_id:
+          title: Tenant Id
+          type: string
+        username:
+          title: Username
+          type: string
+      required:
+      - id
+      - tenant_id
+      - username
+      - status
+      title: UserResponse
+      type: object
+    ValidationError:
+      properties:
+        ctx:
+          title: Context
+          type: object
+        input:
+          title: Input
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          title: Location
+          type: array
+        msg:
+          title: Message
+          type: string
+        type:
+          title: Error Type
+          type: string
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+      type: object
+  securitySchemes:
+    HTTPBearer:
+      scheme: bearer
+      type: http
 info:
   title: OpenRAG Lab API
   version: 0.1.0
-  description: OpenRAG Lab 自研前后端契约。FastAPI 后端暴露给 React 前端的接口。
-servers:
-  - url: http://localhost:8000
-    description: Local development
-
+openapi: 3.1.0
 paths:
-  /api/health:
-    get:
-      summary: Health check
-      operationId: health
-      tags:
-        - system
-      responses:
-        "200":
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    example: ok
-
-  /api/search:
+  /api/auth/login:
     post:
-      summary: Search knowledge base through OpenRAG
-      operationId: search
-      tags:
-        - search
+      operationId: login_api_auth_login_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/SearchRequest"
+              $ref: '#/components/schemas/LoginRequest'
+        required: true
       responses:
-        "200":
-          description: Search results
+        '200':
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SearchResponse"
-        "502":
-          description: OpenRAG upstream error
-
+                $ref: '#/components/schemas/TokenResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Login
+      tags:
+      - auth
+  /api/auth/me:
+    get:
+      operationId: me_api_auth_me_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+          description: Successful Response
+      security:
+      - HTTPBearer: []
+      summary: Me
+      tags:
+      - auth
+  /api/auth/register:
+    post:
+      operationId: register_api_auth_register_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      summary: Register
+      tags:
+      - auth
   /api/chat:
     post:
-      summary: Chat with OpenRAG
-      operationId: chat
-      tags:
-        - chat
+      description: Answer using the documents owned by the caller's tenant.
+      operationId: chat_api_chat_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ChatRequest"
+              $ref: '#/components/schemas/ChatRequest'
+        required: true
       responses:
-        "200":
-          description: Chat response
+        '200':
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ChatResponse"
-        "502":
-          description: OpenRAG upstream error
-
+                $ref: '#/components/schemas/ChatOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - HTTPBearer: []
+      summary: Chat
+      tags:
+      - chat
   /api/documents:
     get:
-      summary: List ingested documents
-      operationId: listDocuments
-      tags:
-        - documents
+      description: List the documents the caller's tenant has registered.
+      operationId: list_documents_api_documents_get
+      parameters:
+      - in: query
+        name: tenant_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Id
       responses:
-        "200":
-          description: Document list
+        '200':
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/DocumentListResponse"
-        "502":
-          description: OpenRAG upstream error
+                $ref: '#/components/schemas/DocumentListOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - HTTPBearer: []
+      summary: List Documents
+      tags:
+      - documents
+  /api/documents/ingest:
+    post:
+      description: 'Store an uploaded file in OpenRAG under the tenant''s namespace.
 
-components:
-  schemas:
-    SearchRequest:
-      type: object
-      required:
-        - query
-      properties:
-        query:
-          type: string
-          example: 支付网关读超时
-        limit:
-          type: integer
-          default: 10
-        score_threshold:
-          type: number
-          default: 0
-        rerank:
-          type: boolean
-          default: false
-        rerank_model:
-          type: string
-          nullable: true
-          example: BAAI/bge-reranker-v2-m3
-        rerank_top_n:
-          type: integer
-          nullable: true
-        filters:
-          type: object
-          additionalProperties: {}
-          description: 过滤条件，值为任意类型（字符串数组、对象等）。
-          example:
-            data_sources:
-              - "40-2024-支付超时处理规范.md"
 
-    SearchResult:
-      type: object
-      properties:
-        filename:
-          type: string
-        text:
-          type: string
-        score:
-          type: number
-        page:
-          type: integer
-          nullable: true
-        mimetype:
-          type: string
-          nullable: true
+        The document is registered only after OpenRAG reports the ingestion task
 
-    SearchResponse:
-      type: object
-      properties:
-        results:
-          type: array
-          items:
-            $ref: "#/components/schemas/SearchResult"
+        finished, so a failed ingest leaves no registry entry behind.'
+      operationId: ingest_document_api_documents_ingest_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_ingest_document_api_documents_ingest_post'
+        required: true
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - HTTPBearer: []
+      summary: Ingest Document
+      tags:
+      - documents
+  /api/documents/{filename}:
+    delete:
+      description: Delete a registered document by its display name.
+      operationId: delete_document_api_documents__filename__delete
+      parameters:
+      - in: path
+        name: filename
+        required: true
+        schema:
+          title: Filename
+          type: string
+      - in: query
+        name: tenant_id
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenant Id
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteDocumentOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - HTTPBearer: []
+      summary: Delete Document
+      tags:
+      - documents
+  /api/health:
+    get:
+      operationId: health_api_health_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                additionalProperties:
+                  type: string
+                title: Response Health Api Health Get
+                type: object
+          description: Successful Response
+      summary: Health
+      tags:
+      - system
+  /api/permissions:
+    get:
+      operationId: list_permissions_api_permissions_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/PermissionOut'
+                title: Response List Permissions Api Permissions Get
+                type: array
+          description: Successful Response
+      security:
+      - HTTPBearer: []
+      summary: List Permissions
+      tags:
+      - roles
+  /api/roles:
+    get:
+      operationId: list_roles_api_roles_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/RoleOut'
+                title: Response List Roles Api Roles Get
+                type: array
+          description: Successful Response
+      security:
+      - HTTPBearer: []
+      summary: List Roles
+      tags:
+      - roles
+  /api/search:
+    post:
+      description: 'Search the documents owned by the caller''s tenant.
 
-    ChatRequest:
-      type: object
-      required:
-        - message
-      properties:
-        message:
-          type: string
-          example: 2024 年支付网关读超时是多少？
-        limit:
-          type: integer
-          default: 10
-        score_threshold:
-          type: number
-          default: 0
-        filters:
-          type: object
-          additionalProperties: {}
-          description: 过滤条件，值为任意类型（字符串数组、对象等）。
 
-    ChatResponse:
-      type: object
-      properties:
-        response:
-          type: string
-        chat_id:
-          type: string
-          nullable: true
-        sources:
-          type: array
-          items:
-            $ref: "#/components/schemas/SearchResult"
-
-    FileRecord:
-      type: object
-      properties:
-        filename:
-          type: string
-        document_id:
-          type: string
-        mimetype:
-          type: string
-        chunk_count:
-          type: integer
-        embedding_model:
-          type: string
-
-    DocumentListResponse:
-      type: object
-      properties:
-        total:
-          type: integer
-        files:
-          type: array
-          items:
-            $ref: "#/components/schemas/FileRecord"
+        The tenant boundary comes from the document registry, never from the body.'
+      operationId: search_api_search_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchOut'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - HTTPBearer: []
+      summary: Search
+      tags:
+      - search
+  /api/tenants/me:
+    get:
+      operationId: get_my_tenant_api_tenants_me_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TenantResponse'
+          description: Successful Response
+      security:
+      - HTTPBearer: []
+      summary: Get My Tenant
+      tags:
+      - tenants
+  /api/users:
+    get:
+      operationId: list_users_api_users_get
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/UserResponse'
+                title: Response List Users Api Users Get
+                type: array
+          description: Successful Response
+      security:
+      - HTTPBearer: []
+      summary: List Users
+      tags:
+      - users
+    post:
+      operationId: create_user_api_users_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserRequest'
+        required: true
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+          description: Successful Response
+        '422':
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+          description: Validation Error
+      security:
+      - HTTPBearer: []
+      summary: Create User
+      tags:
+      - users

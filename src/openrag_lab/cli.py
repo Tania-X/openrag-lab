@@ -221,6 +221,22 @@ def sync_dify_assets() -> None:
 
 
 @app.command()
+def export_openapi(
+    output: Path = typer.Option(  # noqa: B008
+        Path("openapi/openrag-lab.yaml"),
+        "--output",
+        "-o",
+        help="Where to write the generated OpenAPI document.",
+    ),
+) -> None:
+    """Regenerate openapi/openrag-lab.yaml from the FastAPI app."""
+    from openrag_lab.openapi_export import export_openapi as write_spec
+
+    path = write_spec(output)
+    console.print(f"[green]Wrote {path}[/green]")
+
+
+@app.command()
 def reingest_legacy(
     tenant: str = typer.Option("default", "--tenant", help="Tenant slug to store documents under."),  # noqa: B008
     source: Path = typer.Option(  # noqa: B008

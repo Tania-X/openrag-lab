@@ -164,10 +164,11 @@ http://localhost:8000
 
 ## API 契约
 
-接口约定与 OpenAPI 文件：
+接口约定与 OpenAPI 文件（后者的自研后端那份由 `openrag-lab export-openapi` 生成，
+CI 会校验它与代码一致）：
 
 ```text
 docs/api-contract.md              # 前后端 + OpenRAG 外部服务契约说明
-openapi/openrag-lab.yaml          # 自研 FastAPI 后端 OpenAPI
-openapi/openrag.yaml              # OpenRAG Public API 调用子集
+openapi/openrag-lab.yaml          # 自研 FastAPI 后端 OpenAPI（由代码生成，勿手改）
+openapi/openrag.yaml              # OpenRAG Public API 调用子集（手工维护 + 线上校验）
 ```
