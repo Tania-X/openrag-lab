@@ -8,6 +8,7 @@ claim a document that is not actually indexed.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -56,10 +57,16 @@ class FakeDocumentGateway:
         self.deleted: list[dict[str, Any]] = []
         self.task: dict[str, Any] = {"status": "completed", "failed_files": 0}
         self.error: OpenRAGError | None = None
+        self.staged_path: Path | None = None
 
     def ingest_document(self, **kwargs: Any) -> dict[str, Any]:
         if self.error is not None:
             raise self.error
+        # Read the staged file the way the real client does: by path, from a
+        # worker thread, while the upload request is still in flight.
+        path = kwargs["path"]
+        kwargs["uploaded_bytes"] = path.read_bytes()
+        self.staged_path = path
         self.ingested.append(kwargs)
         return self.task
 
@@ -253,6 +260,19 @@ async def test_upload_without_a_filename_is_rejected() -> None:
         )
     assert response.status_code == 422
     assert gateway.ingested == []
+
+
+async def test_upload_keeps_the_file_readable_until_ingestion_finishes() -> None:
+    """The staged file must still exist while the gateway is reading it."""
+    async with _build_client(actor=ACME_TENANT) as (client, gateway):
+        response = await client.post(
+            "/api/documents/ingest", files=_upload("report.md", b"# unique body\n")
+        )
+    assert response.status_code == 201
+    assert gateway.ingested[-1]["uploaded_bytes"] == b"# unique body\n"
+    # ...and the temporary file is cleaned up afterwards.
+    assert gateway.staged_path is not None
+    assert not gateway.staged_path.exists()
 
 
 @pytest.mark.parametrize(

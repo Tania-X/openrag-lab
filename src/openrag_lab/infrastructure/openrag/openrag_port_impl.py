@@ -22,19 +22,30 @@ class OpenRAGGateway:
         self,
         client_factory: Callable[..., OpenRAGClient] = OpenRAGClient,
         base_url: str | None = None,
+        ingest_timeout: float | None = None,
     ) -> None:
         self._client_factory = client_factory
         self._base_url = base_url
+        self._ingest_timeout = ingest_timeout
 
     def _client(self, api_key: str) -> OpenRAGClient:
         """Build a client for one tenant.
 
         The address is passed explicitly rather than left to the client's own
         defaulting, so the gateway always targets the configured OpenRAG
-        instance even if that defaulting changes.
+        instance even if that defaulting changes. The ingestion timeout is set
+        here too: it decides how long a request thread can be held.
         """
-        base_url = self._base_url or get_settings().openrag_base_url
-        return self._client_factory(base_url=base_url, api_key=api_key)
+        settings = get_settings()
+        base_url = self._base_url or settings.openrag_base_url
+        timeout = (
+            self._ingest_timeout
+            if self._ingest_timeout is not None
+            else settings.upload_ingest_timeout_seconds
+        )
+        return self._client_factory(
+            base_url=base_url, api_key=api_key, ingest_timeout=timeout
+        )
 
     def search(
         self,

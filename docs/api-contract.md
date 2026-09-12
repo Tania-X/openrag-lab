@@ -176,15 +176,15 @@ super_admin    传一个不存在的 tenant_id → 404
 }
 ```
 
-`tenant_id` 查询参数只有 `super_admin` 能用（同 search/chat 的规则）。
+`tenant_id` 是**可选查询参数**，只有 `super_admin` 能用（同 search/chat 的规则）。
 
 ### 2.6 POST /api/documents/ingest
 
 需要权限：`documents:upload`。`multipart/form-data`，字段：
 
 ```text
-file       必填，文件本体（默认上限 50 MiB，见 MAX_UPLOAD_BYTES）
-tenant_id  可选，只有 super_admin 可用
+file       必填（multipart），文件本体；默认上限 50 MiB，见 MAX_UPLOAD_BYTES
+tenant_id  可选（multipart 表单字段），只有 super_admin 可用
 ```
 
 规则：
@@ -201,10 +201,16 @@ tenant_id  可选，只有 super_admin 可用
 成功返回 201 与一条 `DocumentOut`（字段同 2.5）。状态码：400 文件名不合法或入库失败、
 403 无权限或跨租户、413 超过上传上限、502 调用 OpenRAG 失败。
 
+上传是**长事务**：请求会同步等待 OpenRAG 的入库任务完成，等待上限由
+`UPLOAD_INGEST_TIMEOUT_SECONDS` 控制（默认 300 秒），期间占用一个工作线程。
+并发上传多份大文件会挤占同一进程的线程池，从而拖慢 search/chat；
+需要大批量入库时用 CLI 或分批提交，不要并发打这个接口。
+
 ### 2.7 DELETE /api/documents/{filename}
 
 需要权限：`documents:delete`。路径参数是**显示名**（不是存储名），
-服务端据此推导存储名并在登记表里校验归属：
+服务端据此推导存储名并在登记表里校验归属；
+`tenant_id` 是可选查询参数，只有 `super_admin` 能用：
 
 ```text
 未登记的文档 → 404（因此无法删除别的租户文档：那是 acme/xxx，本租户从未登记）

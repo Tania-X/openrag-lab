@@ -21,9 +21,10 @@ class FakeClient:
 
     instances: list[FakeClient] = []
 
-    def __init__(self, base_url: str, api_key: str) -> None:
+    def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
         self.base_url = base_url
         self.api_key = api_key
+        self.ingest_timeout = ingest_timeout
         self.closed = False
         self.calls: list[tuple[str, dict[str, Any]]] = []
         FakeClient.instances.append(self)
@@ -115,6 +116,30 @@ def test_search_forwards_the_server_built_filters() -> None:
     assert call["rerank"] is True
     assert call["rerank_model"] == "BAAI/bge-reranker-v2-m3"
     assert call["rerank_top_n"] == 5
+
+
+def test_the_gateway_bounds_how_long_an_ingest_may_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uploading holds a worker thread, so the wait must be bounded."""
+    monkeypatch.setattr(
+        get_settings(), "upload_ingest_timeout_seconds", 42.0, raising=False
+    )
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    gateway.chat(
+        api_key="k", message="q", filters={"data_sources": []}, limit=1, score_threshold=0.0
+    )
+    assert FakeClient.instances[-1].ingest_timeout == 42.0
+
+
+def test_an_explicit_ingest_timeout_wins_over_settings() -> None:
+    gateway = OpenRAGGateway(
+        client_factory=FakeClient, base_url="http://openrag.test", ingest_timeout=7.5
+    )
+    gateway.chat(
+        api_key="k", message="q", filters={"data_sources": []}, limit=1, score_threshold=0.0
+    )
+    assert FakeClient.instances[-1].ingest_timeout == 7.5
 
 
 def test_an_explicit_base_url_wins_over_settings() -> None:

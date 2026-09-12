@@ -11,6 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.identity.rbac_service import RbacService
+from openrag_lab.config import get_settings
 from openrag_lab.domain.rag.ports import RagGateway
 from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
 from openrag_lab.domain.shared.errors import PermissionDeniedError
@@ -30,7 +31,7 @@ DbSession = Annotated[AsyncSession, Depends(get_session)]
 
 def get_rag_gateway() -> RagGateway:
     """Provide the OpenRAG gateway (overridden in tests)."""
-    return OpenRAGGateway()
+    return OpenRAGGateway(ingest_timeout=get_settings().upload_ingest_timeout_seconds)
 
 
 RagGatewayDep = Annotated[RagGateway, Depends(get_rag_gateway)]

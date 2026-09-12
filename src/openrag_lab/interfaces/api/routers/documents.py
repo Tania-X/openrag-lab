@@ -7,11 +7,12 @@ anything touches OpenRAG.
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from openrag_lab.application.rag.document_service import DocumentService
 from openrag_lab.client import OpenRAGError
@@ -53,7 +54,7 @@ async def list_documents(
     session: DbSession,
     gateway: RagGatewayDep,
     actor: Annotated[CurrentUser, Depends(require_permission("documents:read"))],
-    tenant_id: str | None = None,
+    tenant_id: Annotated[str | None, Query()] = None,
 ) -> DocumentListOut:
     """List the documents the caller's tenant has registered."""
     service = DocumentService(session, gateway)
@@ -80,22 +81,28 @@ async def ingest_document(
     """
     settings = get_settings()
     suffix = Path(file.filename or "upload").suffix
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as buffer:
-        size = 0
-        # Stream to disk and stop at the cap rather than buffering the whole
-        # upload in memory first.
-        while chunk := await file.read(_CHUNK_BYTES):
-            size += len(chunk)
-            if size > settings.max_upload_bytes:
-                raise HTTPException(
-                    status_code=413,
-                    detail=(
-                        "File exceeds the upload limit of "
-                        f"{settings.max_upload_bytes} bytes"
-                    ),
-                )
-            buffer.write(chunk)
-        buffer.flush()
+    # mkstemp rather than NamedTemporaryFile(delete=True): the gateway reads the
+    # file *by path* from a worker thread, and an implicitly-deleting handle
+    # cannot be reopened that way on every platform. The file must stay alive
+    # until the ingestion task has finished, so its lifetime is explicit here.
+    descriptor, temp_name = tempfile.mkstemp(suffix=suffix)
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(descriptor, "wb") as buffer:
+            size = 0
+            # Stream to disk and stop at the cap rather than buffering the whole
+            # upload in memory first.
+            while chunk := await file.read(_CHUNK_BYTES):
+                size += len(chunk)
+                if size > settings.max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(
+                            "File exceeds the upload limit of "
+                            f"{settings.max_upload_bytes} bytes"
+                        ),
+                    )
+                buffer.write(chunk)
         service = DocumentService(session, gateway)
         try:
             document = await service.upload_document(
@@ -103,13 +110,15 @@ async def ingest_document(
                 actor_tenant_id=actor.tenant_id,
                 uploaded_by=actor.user_id,
                 filename=file.filename or "",
-                path=Path(buffer.name),
+                path=temp_path,
                 mimetype=file.content_type or "application/octet-stream",
                 size_bytes=size,
                 tenant_id=tenant_id,
             )
         except OpenRAGError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
     return _to_out(document)
 
 
@@ -119,7 +128,9 @@ async def delete_document(
     session: DbSession,
     gateway: RagGatewayDep,
     actor: Annotated[CurrentUser, Depends(require_permission("documents:delete"))],
-    tenant_id: str | None = None,
+    # Declared explicitly: an unannotated parameter is still inferred as a query
+    # parameter today, but the contract should not depend on that inference.
+    tenant_id: Annotated[str | None, Query()] = None,
 ) -> DeleteDocumentOut:
     """Delete a registered document by its display name."""
     service = DocumentService(session, gateway)

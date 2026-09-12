@@ -58,6 +58,10 @@ class Settings(BaseSettings):
 
     #: Largest document upload accepted, in bytes (default 50 MiB).
     max_upload_bytes: int = Field(default=50 * 1024 * 1024, alias="MAX_UPLOAD_BYTES")
+    #: How long an upload request waits for OpenRAG's ingestion task. Uploading
+    #: is a long transaction that holds a worker thread, so this bounds both the
+    #: request and the thread it occupies (default 5 minutes).
+    upload_ingest_timeout_seconds: float = Field(default=300.0, alias="UPLOAD_INGEST_TIMEOUT_SECONDS")
 
     eval_csv: Path = Field(default=PROJECT_ROOT / "configs/eval/fintech-eval.csv", alias="EVAL_CSV")
     dify_rag_lab_path: Path = Field(default=Path("../dify-rag-lab"), alias="DIFY_RAG_LAB_PATH")
