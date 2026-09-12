@@ -73,6 +73,13 @@ class RetrievalScopeResolver:
         target_tenant_id = requested_tenant_id or actor_tenant_id
         cross_tenant = target_tenant_id != actor_tenant_id
 
+        # Authorization model for a target tenant other than the caller's own:
+        # only a global `super_admin` may read across tenants. Tenant-scoped
+        # roles (tenant_admin included) never cross, and there is no
+        # "administers tenant X" relationship in Phase 1 — that is why this
+        # branch checks the global role directly instead of consulting the
+        # tenant-dimension permissions that `require_permission` uses.
+        # Narrowing super_admin later means revisiting this line.
         if cross_tenant and not await self._rbac.is_super_admin(actor_user_id):
             # Without this check a tenant id would be a read primitive.
             raise PermissionDeniedError("Cross-tenant access requires super_admin")

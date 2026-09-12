@@ -9,6 +9,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
+class ConfigurationError(RuntimeError):
+    """Raised when the deployment is missing configuration it needs to serve.
+
+    This is a server-side problem, not a bad request: callers surface it as
+    ``503`` so a misconfigured deployment is distinguishable from a bug.
+    """
+
+
 class Settings(BaseSettings):
     """Runtime settings for OpenRAG Lab."""
 

@@ -333,6 +333,19 @@ async def test_openrag_failure_is_reported_as_bad_gateway() -> None:
     assert response.status_code == 502
 
 
+async def test_missing_openrag_key_is_reported_as_service_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unconfigured deployment is 503, not a client error or a bare 500."""
+    client, gateway = await _build_client(actor=ACME_USER)
+    monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
+    async with client:
+        response = await client.post("/api/search", json={"query": "报表"})
+    assert response.status_code == 503
+    assert "OPENRAG_API_KEY" not in response.text
+    assert gateway.calls == []
+
+
 @pytest.mark.parametrize(
     "payload",
     [
