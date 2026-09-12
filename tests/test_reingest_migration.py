@@ -137,8 +137,13 @@ def test_legacy_copies_already_replaced_in_place_are_not_a_failure(
             from openrag_lab.client import OpenRAGError
 
             raise OpenRAGError(
-                'OpenRAG DELETE /api/v1/documents -> 404: {"success":false,'
-                ' "deleted_chunks":0, "error":"No matching document chunks were deleted."}'
+                "OpenRAG DELETE /api/v1/documents -> 404",
+                status_code=404,
+                payload={
+                    "success": False,
+                    "deleted_chunks": 0,
+                    "error": "No matching document chunks were deleted.",
+                },
             )
 
     source = _source(tmp_path, "a.md")
@@ -153,3 +158,49 @@ def test_legacy_copies_already_replaced_in_place_are_not_a_failure(
 
     assert report.already_gone == ["a.md"]
     assert report.delete_failed == []
+
+
+def test_a_name_the_api_would_reject_is_reported_not_ingested(tmp_path: Path) -> None:
+    """The migration applies the same storage-name rule as the upload path.
+
+    A backslash is legal on APFS/ext4 but rejected by the rule (and a real
+    length overflow is unreachable here, since the filesystem caps a name well
+    below MAX_STORED_FILENAME_LENGTH).
+    """
+    source = _source(tmp_path, "ok.md")
+    bad_name = "report\\draft.md"
+    (tmp_path / bad_name).write_text("# doc\n")
+    client = FakeClient(remote=[])
+
+    report = reingest_legacy_documents(
+        client,  # type: ignore[arg-type]
+        tenant_slug="default",
+        source=source,
+    )
+
+    assert report.reingested == ["default/ok.md"]
+    assert [name for name, _ in report.failed] == [bad_name]
+    assert "Invalid document filename" in report.failed[0][1]
+    assert client.ingested == ["default/ok.md"]
+
+
+def test_nothing_to_delete_uses_the_structured_error() -> None:
+    """No string matching: the client carries status and payload."""
+    from openrag_lab.client import OpenRAGError
+    from openrag_lab.reingest import _nothing_to_delete
+
+    already_gone = OpenRAGError(
+        "OpenRAG DELETE ... -> 404",
+        status_code=404,
+        payload={"success": False, "deleted_chunks": 0, "error": "No matching document"},
+    )
+    removed = OpenRAGError(
+        "OpenRAG DELETE ... -> 200",
+        status_code=200,
+        payload={"success": True, "deleted_chunks": 3},
+    )
+    opaque = OpenRAGError("OpenRAG DELETE ... -> 500: boom")
+
+    assert _nothing_to_delete(already_gone) is True
+    assert _nothing_to_delete(removed) is False
+    assert _nothing_to_delete(opaque) is False

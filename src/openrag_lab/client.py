@@ -17,7 +17,22 @@ from openrag_lab.config import get_settings
 
 
 class OpenRAGError(RuntimeError):
-    """Raised when OpenRAG returns an unexpected response."""
+    """Raised when OpenRAG returns an unexpected response.
+
+    Carries the HTTP status and, when the body was JSON, the parsed payload, so
+    callers can branch on fields instead of pattern-matching the message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        payload: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload
 
 
 class OpenRAGClient:
@@ -73,8 +88,15 @@ class OpenRAGClient:
             raise OpenRAGError(f"OpenRAG request failed: {exc}") from exc
 
         if resp.is_error:
+            body: Any | None = None
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
             raise OpenRAGError(
-                f"OpenRAG {method} {path} -> {resp.status_code}: {resp.text[:500]}"
+                f"OpenRAG {method} {path} -> {resp.status_code}: {resp.text[:500]}",
+                status_code=resp.status_code,
+                payload=body,
             )
 
         if resp.content:

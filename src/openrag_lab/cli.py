@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import typer
@@ -264,9 +265,7 @@ async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) 
     settings = get_settings()
     await create_all()
 
-    session_ctx = get_session()
-    session = await anext(session_ctx)
-    try:
+    async with asynccontextmanager(get_session)() as session:
         tenant = await SqlTenantRepository(session).find_by_slug(tenant_slug)
         if tenant is None:
             console.print(f"[red]Tenant not found: {tenant_slug}[/red]")
@@ -324,8 +323,6 @@ async def _reingest_legacy(tenant_slug: str, source: Path, delete_legacy: bool) 
                 settings.openrag_base_url, settings.openrag_api_key
             ) as client:
                 delete_legacy_copies(client, report)
-    finally:
-        await session_ctx.aclose()
 
     table = Table(title=f"Legacy re-ingest into {report.namespace}")
     table.add_column("Result")

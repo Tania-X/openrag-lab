@@ -7,6 +7,7 @@ claim a document that is not actually indexed.
 
 from __future__ import annotations
 
+import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -334,6 +335,29 @@ async def test_upload_larger_than_the_limit_is_rejected(
     assert gateway.ingested == []
 
 
+async def test_rejected_oversized_upload_leaves_no_temp_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 413 path must not leak the staging file it created."""
+    created: list[Path] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def recording_mkstemp(*args: Any, **kwargs: Any):
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        created.append(Path(name))
+        return descriptor, name
+
+    monkeypatch.setattr("openrag_lab.interfaces.api.routers.documents.tempfile.mkstemp", recording_mkstemp)
+    monkeypatch.setattr(get_settings(), "max_upload_bytes", 8, raising=False)
+    async with _build_client(actor=ACME_TENANT) as (client, gateway):
+        response = await client.post(
+            "/api/documents/ingest", files=_upload("big.md", b"x" * 64)
+        )
+    assert response.status_code == 413
+    assert created and all(not path.exists() for path in created)
+    assert gateway.ingested == []
+
+
 async def test_upload_requires_the_upload_permission() -> None:
     async with _build_client(actor=ACME_TENANT, tenant_role="viewer") as (client, _):
         response = await client.post("/api/documents/ingest", files=_upload("x.md"))
@@ -392,6 +416,25 @@ async def test_delete_cannot_reach_another_tenants_document() -> None:
     # acme/theirs.md was never registered, so the other tenant's copy is safe.
     assert response.status_code == 404
     assert gateway.deleted == []
+
+
+async def test_super_admin_may_delete_in_another_tenant() -> None:
+    """Documented design intent: super_admin is the global root.
+
+    It reaches any active tenant exactly as it does for search and user
+    creation; the resolver is the single place that decides this.
+    """
+    async with _build_client(
+        actor=ROOT,
+        documents_seed=[("t-globex", "theirs.md")],
+        tenant_role="developer",
+    ) as (client, gateway):
+        response = await client.delete(
+            "/api/documents/theirs.md", params={"tenant_id": "t-globex"}
+        )
+    assert response.status_code == 200
+    assert gateway.deleted[-1]["stored_filename"] == "globex/theirs.md"
+    assert response.json()["stored_filename"] == "globex/theirs.md"
 
 
 async def test_delete_requires_the_delete_permission() -> None:

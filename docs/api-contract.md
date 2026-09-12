@@ -209,8 +209,17 @@ tenant_id  可选（multipart 表单字段），只有 super_admin 可用
 ### 2.7 DELETE /api/documents/{filename}
 
 需要权限：`documents:delete`。路径参数是**显示名**（不是存储名），
-服务端据此推导存储名并在登记表里校验归属；
-`tenant_id` 是可选查询参数，只有 `super_admin` 能用：
+服务端据此推导存储名并在登记表里校验归属。
+
+`tenant_id` 是可选查询参数，作用域规则与 search/chat 完全一致（由同一个
+`resolve_tenant` 决定）：
+
+```text
+不传 tenant_id        → 只能删自己租户已登记的文档
+传别人的 tenant_id    → 非 super_admin 一律 403
+                        super_admin 可以删任意 ACTIVE 租户的文档
+                        （全局根角色，与它可以在任意租户建用户同一套授权模型）
+```
 
 ```text
 未登记的文档 → 404（因此无法删除别的租户文档：那是 acme/xxx，本租户从未登记）

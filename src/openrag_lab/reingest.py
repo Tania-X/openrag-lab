@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from openrag_lab.client import OpenRAGClient, OpenRAGError
+from openrag_lab.domain.identity.models import scoped_filename
+from openrag_lab.domain.shared.errors import InvalidOperationError
 from openrag_lab.ingest import iter_supported_files
 
 RegisterDocument = Callable[[str, str, Path, dict[str, Any]], None]
@@ -62,7 +64,13 @@ def reingest_legacy_documents(
     }
 
     for path in files:
-        stored = f"{namespace}{path.name}"
+        try:
+            # Same rule as the upload path, so the migration cannot write a
+            # storage name the API would reject.
+            stored = scoped_filename(namespace, path.name)
+        except InvalidOperationError as exc:
+            report.failed.append((path.name, str(exc)))
+            continue
         if stored in remote_names:
             report.already_present.append(stored)
             if register is not None:
@@ -131,5 +139,9 @@ def delete_legacy_copies(client: OpenRAGClient, report: MigrationReport) -> Migr
 
 def _nothing_to_delete(exc: OpenRAGError) -> bool:
     """True when OpenRAG reports that no chunks matched the filename."""
-    text = str(exc)
-    return '"deleted_chunks":0' in text.replace(" ", "") or "No matching document" in text
+    payload = exc.payload if isinstance(exc.payload, dict) else {}
+    if exc.status_code == 404 and int(payload.get("deleted_chunks") or 0) == 0:
+        return True
+    return payload.get("success") is False and "No matching document" in str(
+        payload.get("error") or ""
+    )

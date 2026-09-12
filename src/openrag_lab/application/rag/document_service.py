@@ -104,7 +104,11 @@ class DocumentService:
             existing.display_name = display_name
             existing.mimetype = mimetype
             existing.size_bytes = size_bytes
-            existing.openrag_document_id = str(task.get("document_id") or "") or None
+            # Only overwrite an id we actually received: a replace-duplicates
+            # task need not echo one, and losing it would be a silent downgrade.
+            new_id = str(task.get("document_id") or "") or None
+            if new_id is not None:
+                existing.openrag_document_id = new_id
             document = existing
         else:
             document = Document(
@@ -129,6 +133,15 @@ class DocumentService:
         filename: str,
         tenant_id: str | None = None,
     ) -> dict[str, Any]:
+        """Remove a registered document from OpenRAG and the registry.
+
+        Scope comes from :meth:`RetrievalScopeResolver.resolve_tenant`, exactly
+        as for search: a caller reaches its own tenant, and a global
+        ``super_admin`` may pass ``tenant_id`` to act on any active tenant
+        (that is the same authority it uses to create users elsewhere — see the
+        authorization model documented in retrieval_scope). Everyone else is
+        rejected with 403 by the resolver.
+        """
         tenant, _ = await self._resolver.resolve_tenant(
             actor_user_id=actor_user_id,
             actor_tenant_id=actor_tenant_id,
