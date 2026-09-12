@@ -688,12 +688,16 @@ GET  /api/health
 
 ```text
 GET  /api/auth/me
-POST /api/search      # 需要 search:use
-POST /api/chat        # 需要 chat:use
-GET  /api/documents   # s1p3c
+POST /api/search      # 需要 search:use（s1p3b）
+POST /api/chat        # 需要 chat:use（s1p3b）
+GET  /api/documents   # s1p3c（旧的无鉴权版本已在 s1p3b 移除）
 POST /api/documents/ingest      # s1p3c
 DELETE /api/documents/{filename} # s1p3c
 ```
+
+> s1p3b 移除了旧的无鉴权 `GET /api/documents`：它直接返回全库文件名清单，
+> 在其它接口都收了权限之后继续留着就是一个现成的泄露面。
+> s1p3c 会以「需要 `documents:read` + 只返回本租户已登记文档」的契约重新提供。
 
 #### POST /api/search（s1p3b 已实现）
 
@@ -816,7 +820,7 @@ src/openrag_lab/
 │   │       ├── roles.py
 │   │       ├── search.py          # s1p3b：已迁入（原 api/routers/search.py 删除）
 │   │       ├── chat.py            # s1p3b：已迁入（原 api/routers/chat.py 删除）
-│   │       └── documents.py       # s1p3c
+│   │       └── documents.py       # s1p3c（原无鉴权的 api/routers/documents.py 已删除）
 │   └── schemas/
 └── cli.py
 ```
@@ -824,8 +828,8 @@ src/openrag_lab/
 已知偏差（后续阶段收敛）：
 
 ```text
-- 顶层 client.py / api/main.py / api/routers/documents.py 仍在旧位置
-- s1p3c 会把 documents 路由搬进 interfaces/api/routers/ 并接上登记表
+- 顶层 client.py 与 api/main.py 仍在旧位置（api/routers/ 现只剩 health.py）
+- s1p3c 会把 documents 路由写进 interfaces/api/routers/ 并接上登记表
 ```
 
 **前端影响**：`/api/search`、`/api/chat`、`/api/documents` 现在都要求登录态，

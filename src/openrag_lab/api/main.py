@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from openrag_lab.api.routers import documents, health
+from openrag_lab.api.routers import health
 from openrag_lab.application.identity.auth_service import AuthService
 from openrag_lab.config import get_settings
 from openrag_lab.infrastructure.db.integrity import find_tenants_with_invalid_slug
@@ -87,9 +87,6 @@ app.add_middleware(
 )
 
 app.include_router(health.router)
-
-# Documents (legacy lab API; s1p3c moves it behind RBAC and the registry)
-app.include_router(documents.router)
 
 # Identity & Access (s1p2)
 app.include_router(auth.router)

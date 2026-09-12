@@ -7,6 +7,7 @@ filenames, and the ``data_sources`` key must always be present.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 import pytest
@@ -67,108 +68,117 @@ class FakeGateway:
 
     @property
     def filters(self) -> dict[str, Any]:
+        assert self.calls, "the gateway was never called"
         return self.calls[-1][1]["filters"]
 
 
+@asynccontextmanager
 async def _build_client(
     *,
     actor: CurrentUser | None,
     documents: list[tuple[str, str]] | None = None,
     tenant_status: TenantStatus = TenantStatus.ACTIVE,
     tenant_role: str | None = "user",
-) -> tuple[AsyncClient, FakeGateway]:
-    """Build the search/chat app over an in-memory DB.
+):
+    """Yield a client for the search/chat app over a throwaway in-memory DB.
 
     ``documents`` is a list of (tenant_id, display_name) owned by that tenant.
+    The engine is created here and disposed on exit, so no test leaks it.
     """
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         poolclass=StaticPool,
         connect_args={"check_same_thread": False},
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        await seed_identity(session)
-        tenant_repo = SqlTenantRepository(session)
-        user_repo = SqlUserRepository(session)
-        role_repo = SqlTenantUserRoleRepository(session)
-        global_role_repo = SqlUserGlobalRoleRepository(session)
-        document_repo = SqlDocumentRepository(session)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            await seed_identity(session)
+            tenant_repo = SqlTenantRepository(session)
+            user_repo = SqlUserRepository(session)
+            role_repo = SqlTenantUserRoleRepository(session)
+            global_role_repo = SqlUserGlobalRoleRepository(session)
+            document_repo = SqlDocumentRepository(session)
 
-        for tenant_id, slug, username, status, global_role in (
-            ("t-acme", "acme", "alice", tenant_status, None),
-            ("t-globex", "globex", "bob", TenantStatus.ACTIVE, None),
-        ):
-            tenant = Tenant(id=TenantId(tenant_id), name=slug.title(), slug=slug, status=status)
-            await tenant_repo.save(tenant)
-            user = User(
-                id=UserId(f"u-{slug}"),
-                tenant_id=tenant.id,
-                username=username,
+            for tenant_id, slug, username, status, global_role in (
+                ("t-acme", "acme", "alice", tenant_status, None),
+                ("t-globex", "globex", "bob", TenantStatus.ACTIVE, None),
+            ):
+                tenant = Tenant(
+                    id=TenantId(tenant_id), name=slug.title(), slug=slug, status=status
+                )
+                await tenant_repo.save(tenant)
+                user = User(
+                    id=UserId(f"u-{slug}"),
+                    tenant_id=tenant.id,
+                    username=username,
+                    password_hash="hashed",
+                )
+                await user_repo.save(user)
+                if tenant_role is not None:
+                    role = await _role(session, tenant_role)
+                    await role_repo.assign_role(
+                        TenantUserRole(
+                            tenant_id=tenant.id, user_id=user.id, role_id=role.id
+                        )
+                    )
+                if global_role is not None:
+                    await global_role_repo.assign_global_role(
+                        _global_role(global_role, user.id)
+                    )
+            await session.flush()
+
+            # A super_admin lives in acme so cross-tenant requests can be tested.
+            super_admin = User(
+                id=UserId("u-root"),
+                tenant_id=TenantId("t-acme"),
+                username="root",
                 password_hash="hashed",
             )
-            await user_repo.save(user)
-            if tenant_role is not None:
-                role = await _role(session, tenant_role)
-                await role_repo.assign_role(
-                    TenantUserRole(
-                        tenant_id=tenant.id, user_id=user.id, role_id=role.id
+            await user_repo.save(super_admin)
+            await global_role_repo.assign_global_role(
+                _global_role(GlobalRoleName.SUPER_ADMIN.value, super_admin.id)
+            )
+
+            for tenant_id, display_name in documents or []:
+                tenant = await tenant_repo.find_by_id(TenantId(tenant_id))
+                assert tenant is not None
+                stored = tenant.scope_filename(display_name)
+                await document_repo.save(
+                    Document(
+                        id=DocumentId(stored),
+                        tenant_id=tenant.id,
+                        stored_filename=stored,
+                        display_name=display_name,
+                        uploaded_by=UserId(f"u-{tenant.slug}"),
                     )
                 )
-            if global_role is not None:
-                await global_role_repo.assign_global_role(
-                    _global_role(global_role, user.id)
-                )
-        await session.flush()
+            await session.commit()
 
-        # A super_admin lives in acme so cross-tenant requests can be tested.
-        super_admin = User(
-            id=UserId("u-root"),
-            tenant_id=TenantId("t-acme"),
-            username="root",
-            password_hash="hashed",
-        )
-        await user_repo.save(super_admin)
-        await global_role_repo.assign_global_role(
-            _global_role(GlobalRoleName.SUPER_ADMIN.value, super_admin.id)
-        )
+        app = FastAPI()
+        register_exception_handlers(app)
+        app.include_router(search.router)
+        app.include_router(chat.router)
 
-        for tenant_id, display_name in documents or []:
-            tenant = await tenant_repo.find_by_id(TenantId(tenant_id))
-            assert tenant is not None
-            stored = tenant.scope_filename(display_name)
-            await document_repo.save(
-                Document(
-                    id=DocumentId(stored),
-                    tenant_id=tenant.id,
-                    stored_filename=stored,
-                    display_name=display_name,
-                    uploaded_by=UserId(f"u-{tenant.slug}"),
-                )
-            )
-        await session.commit()
+        gateway = FakeGateway()
 
-    app = FastAPI()
-    register_exception_handlers(app)
-    app.include_router(search.router)
-    app.include_router(chat.router)
+        async def _session_override():
+            async with session_factory() as session:
+                yield session
 
-    gateway = FakeGateway()
+        app.dependency_overrides[get_session] = _session_override
+        app.dependency_overrides[get_rag_gateway] = lambda: gateway
+        if actor is not None:
+            app.dependency_overrides[get_current_user] = lambda: actor
 
-    async def _session_override():
-        async with session_factory() as session:
-            yield session
-
-    app.dependency_overrides[get_session] = _session_override
-    app.dependency_overrides[get_rag_gateway] = lambda: gateway
-    if actor is not None:
-        app.dependency_overrides[get_current_user] = lambda: actor
-
-    client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-    return client, gateway
+        client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+        async with client:
+            yield client, gateway
+    finally:
+        await engine.dispose()
 
 
 async def _role(session: AsyncSession, name: str):
@@ -190,25 +200,22 @@ def _global_role(name: str, user_id: UserId):
 
 
 async def test_search_requires_authentication() -> None:
-    client, _ = await _build_client(actor=None)
-    async with client:
+    async with _build_client(actor=None) as (client, _):
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 401
 
 
 async def test_search_requires_the_search_permission() -> None:
-    client, _ = await _build_client(actor=ACME_USER, tenant_role=None)
-    async with client:
+    async with _build_client(actor=ACME_USER, tenant_role=None) as (client, _):
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 403
 
 
 async def test_search_is_scoped_to_the_callers_registered_documents() -> None:
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=ACME_USER,
         documents=[("t-acme", "report.md"), ("t-globex", "secret.md")],
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 200
     assert gateway.filters == {"data_sources": ["acme/report.md"]}
@@ -223,8 +230,7 @@ async def test_search_is_scoped_to_the_callers_registered_documents() -> None:
 
 async def test_tenant_without_documents_still_sends_an_empty_scope() -> None:
     """An empty list means "match nothing"; omitting the key would mean "all"."""
-    client, gateway = await _build_client(actor=ACME_USER, documents=[])
-    async with client:
+    async with _build_client(actor=ACME_USER, documents=[]) as (client, gateway):
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 200
     assert gateway.filters == {"data_sources": []}
@@ -233,10 +239,9 @@ async def test_tenant_without_documents_still_sends_an_empty_scope() -> None:
 
 async def test_client_cannot_inject_filters() -> None:
     """A caller cannot widen the boundary by sending its own filters."""
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=ACME_USER, documents=[("t-acme", "report.md")]
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post(
             "/api/search",
             json={
@@ -249,10 +254,9 @@ async def test_client_cannot_inject_filters() -> None:
 
 
 async def test_cross_tenant_tenant_id_is_rejected_for_non_super_admin() -> None:
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=ACME_USER, documents=[("t-globex", "secret.md")]
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post(
             "/api/search", json={"query": "报表", "tenant_id": "t-globex"}
         )
@@ -262,11 +266,10 @@ async def test_cross_tenant_tenant_id_is_rejected_for_non_super_admin() -> None:
 
 async def test_super_admin_can_scope_to_another_tenant() -> None:
     root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=root,
         documents=[("t-acme", "report.md"), ("t-globex", "secret.md")],
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post(
             "/api/search", json={"query": "报表", "tenant_id": "t-globex"}
         )
@@ -281,11 +284,10 @@ async def test_super_admin_can_scope_to_another_tenant() -> None:
 
 async def test_super_admin_defaults_to_their_own_tenant() -> None:
     root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=root,
         documents=[("t-acme", "report.md"), ("t-globex", "secret.md")],
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 200
     assert gateway.filters == {"data_sources": ["acme/report.md"]}
@@ -293,21 +295,19 @@ async def test_super_admin_defaults_to_their_own_tenant() -> None:
 
 
 async def test_disabled_tenant_cannot_be_queried() -> None:
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=ACME_USER, tenant_status=TenantStatus.DISABLED
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 403
     assert gateway.calls == []
 
 
 async def test_chat_uses_the_same_boundary() -> None:
-    client, gateway = await _build_client(
+    async with _build_client(
         actor=ACME_USER,
         documents=[("t-acme", "report.md"), ("t-globex", "secret.md")],
-    )
-    async with client:
+    ) as (client, gateway):
         response = await client.post("/api/chat", json={"message": "投诉时限?"})
     assert response.status_code == 200
     assert gateway.calls[-1][0] == "chat"
@@ -319,16 +319,14 @@ async def test_chat_uses_the_same_boundary() -> None:
 
 
 async def test_chat_requires_the_chat_permission() -> None:
-    client, _ = await _build_client(actor=ACME_USER, tenant_role=None)
-    async with client:
+    async with _build_client(actor=ACME_USER, tenant_role=None) as (client, _):
         response = await client.post("/api/chat", json={"message": "hi"})
     assert response.status_code == 403
 
 
 async def test_openrag_failure_is_reported_as_bad_gateway() -> None:
-    client, gateway = await _build_client(actor=ACME_USER)
-    gateway.error = OpenRAGError("boom")
-    async with client:
+    async with _build_client(actor=ACME_USER) as (client, gateway):
+        gateway.error = OpenRAGError("boom")
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 502
 
@@ -337,9 +335,8 @@ async def test_missing_openrag_key_is_reported_as_service_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unconfigured deployment is 503, not a client error or a bare 500."""
-    client, gateway = await _build_client(actor=ACME_USER)
-    monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
-    async with client:
+    async with _build_client(actor=ACME_USER) as (client, gateway):
+        monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
         response = await client.post("/api/search", json={"query": "报表"})
     assert response.status_code == 503
     assert "OPENRAG_API_KEY" not in response.text
@@ -356,7 +353,6 @@ async def test_missing_openrag_key_is_reported_as_service_unavailable(
     ],
 )
 async def test_invalid_search_payloads_are_rejected(payload: dict[str, Any]) -> None:
-    client, _ = await _build_client(actor=ACME_USER)
-    async with client:
+    async with _build_client(actor=ACME_USER) as (client, _):
         response = await client.post("/api/search", json=payload)
     assert response.status_code == 422
