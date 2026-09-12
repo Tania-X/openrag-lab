@@ -104,6 +104,7 @@ class DocumentService:
             existing.display_name = display_name
             existing.mimetype = mimetype
             existing.size_bytes = size_bytes
+            existing.uploaded_by = UserId(uploaded_by)
             # Only overwrite an id we actually received: a replace-duplicates
             # task need not echo one, and losing it would be a silent downgrade.
             new_id = str(task.get("document_id") or "") or None
@@ -150,7 +151,11 @@ class DocumentService:
             actor_tenant_id=actor_tenant_id,
             requested_tenant_id=tenant_id,
         )
-        display_name = basename_for_storage(filename)
+        # Delete deliberately does *not* reduce the name to a basename: doing so
+        # turned a malformed request (``a\b.md``, ``" b.md"``) into a delete of a
+        # different document in the caller's own tenant. A name that is not a
+        # plain filename is rejected instead.
+        display_name = filename
         stored_filename = tenant.scope_filename(display_name)
 
         document = await self._documents.find_by_stored_filename(

@@ -88,7 +88,12 @@ async def ingest_document(
     descriptor, temp_name = tempfile.mkstemp(suffix=suffix)
     temp_path = Path(temp_name)
     try:
-        with os.fdopen(descriptor, "wb") as buffer:
+        try:
+            buffer_cm = os.fdopen(descriptor, "wb")
+        except BaseException:
+            os.close(descriptor)  # fdopen failed: nothing owns the fd
+            raise
+        with buffer_cm as buffer:
             size = 0
             # Stream to disk and stop at the cap rather than buffering the whole
             # upload in memory first.

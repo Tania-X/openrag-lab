@@ -450,3 +450,41 @@ async def test_delete_requires_the_delete_permission() -> None:
     ) as (client, _):
         response = await client.delete("/api/documents/report.md")
     assert response.status_code == 403
+
+
+@pytest.mark.parametrize("path", ["a%5Cb.md", "%20report.md", "report.md%20", ".hidden.md"])
+async def test_delete_rejects_names_that_are_not_plain(path: str) -> None:
+    """Reducing a malformed name would delete a *different* document."""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "b.md"), ("t-acme", "report.md")],
+        tenant_role="developer",
+    ) as (client, gateway):
+        response = await client.delete(f"/api/documents/{path}")
+        listing = (await client.get("/api/documents")).json()
+    assert response.status_code == 400
+    assert gateway.deleted == []
+    # Nothing was removed by the rejected request.
+    assert listing["total"] == 2
+
+
+async def test_delete_accepts_a_name_with_an_inner_space() -> None:
+    """Internal spaces are legal in a display name; only edge whitespace is not."""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "quarterly report.md")],
+        tenant_role="developer",
+    ) as (client, gateway):
+        response = await client.delete("/api/documents/quarterly%20report.md")
+    assert response.status_code == 200
+    assert gateway.deleted[-1]["stored_filename"] == "acme/quarterly report.md"
+
+
+async def test_reupload_moves_the_uploader_of_record() -> None:
+    """Whoever last uploaded the document owns the registry row."""
+    async with _build_client(
+        actor=ROOT, documents_seed=[("t-acme", "report.md")], tenant_role="developer"
+    ) as (client, _):
+        await client.post("/api/documents/ingest", files=_upload("report.md"))
+        listing = (await client.get("/api/documents")).json()
+    assert listing["files"][0]["uploaded_by"] == ROOT.user_id
