@@ -431,3 +431,39 @@ backend 日志：Docling result unavailable after SUCCESS status:
   - MRR 用 Wilcoxon 符号秩检验
 - [ ] 多次运行取均值，避免单次结果偶然性
 - [ ] 全量评测集自动合成一份 `fintech-all` 基线
+
+---
+
+## 十一、已修小项（来自 PR #10 第 4 轮评审）
+
+PR #10（OpenAPI 契约改为生成 + 守卫）第 4 轮 AI Review 通过（78/100），
+剩余两条 severity 2 已核实成立，**属于"让守卫的失败信息不说谎"**；
+已在 `chore/type-check-baseline` 这个 PR 里一并修掉（各附用例）：
+
+### 1. `documented_operations` 未过滤 path 级非方法键
+
+- 位置：`src/openrag_lab/openapi_export.py`（函数 `documented_operations`）
+- 现象：对每个 path 直接遍历其所有键并 `upper()`，而 OpenAPI 允许 path item 上出现
+  `parameters` / `summary` / `description` 等非方法键 → 会产出 `PARAMETERS` 之类的伪方法
+- 后果：`test_the_upstream_contract_still_exists_in_the_live_spec` 会拿伪方法去比对上游，
+  报出假失败。当前 `openapi/openrag.yaml` 恰好没有这类键，故为潜在隐患
+- 复现：
+
+  ```python
+  documented_operations(spec_with_path_level_parameters)
+  # {'/api/v1/x': {'GET', 'PARAMETERS'}}
+  ```
+
+- 修法：只保留值为 dict 的键，与同文件的 `public_operations_in` 保持同一防护
+- 已加用例：path 带 `parameters` 时不产生伪方法
+
+### 2. 上游契约校验未处理非 200 / 非 JSON 响应
+
+- 位置：`tests/test_openapi_artifact.py`（`test_the_upstream_contract_still_exists_in_the_live_spec`）
+- 现象：前置检查只有 TCP 端口连通性，随后直接 `httpx.get(url).json()`
+- 后果：端点返回 404/500 时拿到的是没有 `paths` 的 dict → **文档里每条路径都被报成 missing**
+  （误导性失败，掩盖"spec 端点不可用"）；返回 HTML 错误页则直接抛 `JSONDecodeError`
+- 修法：先判状态码、再判能否解析，两种情况给出明确信息（skip 并说明结论不可用）
+
+> 两条都是 `severity 2`，不影响已合并契约的正确性；已随类型检查门禁同一个 PR 修完。
+
