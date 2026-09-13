@@ -196,7 +196,7 @@ class SqlTenantRepository:
         else:
             model.name = tenant.name
             model.slug = tenant.slug
-            model.status = tenant.status.value
+            model.status = tenant.status
             model.updated_at = datetime.now(UTC)
 
     async def list_all(self) -> list[Tenant]:
@@ -230,7 +230,7 @@ class SqlUserRepository:
             model.username = user.username
             model.password_hash = user.password_hash
             model.display_name = user.display_name
-            model.status = user.status.value
+            model.status = user.status
             model.updated_at = datetime.now(UTC)
 
     async def list_by_tenant(self, tenant_id: TenantId) -> list[User]:

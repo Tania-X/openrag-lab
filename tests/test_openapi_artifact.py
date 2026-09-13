@@ -199,7 +199,21 @@ def test_the_upstream_contract_still_exists_in_the_live_spec() -> None:
 
     import httpx
 
-    live = httpx.get(url, timeout=10).json()
+    # A reachable port does not mean a usable spec endpoint. Without these two
+    # guards a 404/HTML answer would be parsed into a dict with no "paths" and
+    # every documented endpoint would then be reported as missing - a failure
+    # that hides its own cause.
+    response = httpx.get(url, timeout=10)
+    if response.status_code != 200:
+        pytest.skip(
+            f"OpenRAG spec endpoint answered {response.status_code}; "
+            "the live contract check is inconclusive"
+        )
+    try:
+        live = response.json()
+    except ValueError:
+        pytest.skip(f"OpenRAG spec endpoint returned no JSON: {url}")
+
     live_paths = live.get("paths", {})
 
     missing: list[str] = []
@@ -217,3 +231,25 @@ def test_the_upstream_contract_still_exists_in_the_live_spec() -> None:
         "openapi/openrag.yaml documents endpoints OpenRAG no longer serves: "
         + json.dumps(missing, ensure_ascii=False)
     )
+
+
+def test_documented_operations_ignores_path_level_keys(tmp_path: Path) -> None:
+    """OpenAPI allows non-method keys at path level; they are not operations."""
+    contract = tmp_path / "upstream.yaml"
+    contract.write_text(
+        """
+openapi: 3.0.3
+info: {title: probe, version: "0"}
+paths:
+  /api/v1/x:
+    summary: not an operation
+    parameters:
+      - name: q
+        in: query
+    get:
+      responses: {"200": {description: ok}}
+""",
+        encoding="utf-8",
+    )
+
+    assert documented_operations(contract) == {"/api/v1/x": {"GET"}}

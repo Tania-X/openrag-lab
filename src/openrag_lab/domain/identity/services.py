@@ -17,8 +17,8 @@ def merge_user_permissions(
     of permissions in the seed data.
     """
     permissions: set[str] = set()
-    for role in tenant_roles:
-        permissions.update(role.permissions)
-    for role in global_roles:
-        permissions.update(role.permissions)
+    for tenant_role in tenant_roles:
+        permissions.update(tenant_role.permissions)
+    for global_role in global_roles:
+        permissions.update(global_role.permissions)
     return permissions

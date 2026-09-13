@@ -119,6 +119,13 @@ def documented_operations(
     """
     spec = yaml.safe_load(path.read_text("utf-8"))
     return {
-        path: {method.upper() for method in operations}
+        path: {
+            # Only real operations: OpenAPI allows path-level keys such as
+            # ``parameters``, ``summary`` and ``description``, which would
+            # otherwise be mistaken for HTTP methods.
+            method.upper()
+            for method, operation in operations.items()
+            if isinstance(operation, dict)
+        }
         for path, operations in (spec.get("paths") or {}).items()
     }

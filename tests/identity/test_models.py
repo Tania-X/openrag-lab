@@ -34,11 +34,19 @@ def test_global_role_has_permission() -> None:
     assert role.has_permission("tenants:write")
 
 
-def test_tenant_activate_disable() -> None:
+def test_tenant_disable() -> None:
     tenant = Tenant(id=TenantId("t1"), name="T1", slug="t1")
     tenant.disable()
     assert tenant.status is TenantStatus.DISABLED
+
+
+def test_tenant_activate_and_is_idempotent() -> None:
+    # A fresh object per expectation: asserting two different members on the same
+    # attribute narrows the type, and the second assertion then looks impossible.
+    tenant = Tenant(id=TenantId("t2"), name="T2", slug="t2")
     tenant.activate()
+    assert tenant.status is TenantStatus.ACTIVE
+    tenant.activate()  # idempotent
     assert tenant.status is TenantStatus.ACTIVE
 
 

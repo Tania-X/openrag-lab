@@ -157,19 +157,19 @@ async def _build_client(
             )
 
             for tid, display_name in documents_seed or []:
-                tenant = await tenant_repo.find_by_id(TenantId(tid))
-                assert tenant is not None
-                stored = tenant.scope_filename(display_name)
+                seeded_tenant = await tenant_repo.find_by_id(TenantId(tid))
+                assert seeded_tenant is not None
+                stored = seeded_tenant.scope_filename(display_name)
                 from openrag_lab.domain.identity.models import Document
                 from openrag_lab.domain.shared.ids import DocumentId
 
                 await document_repo.save(
                     Document(
                         id=DocumentId(stored),
-                        tenant_id=tenant.id,
+                        tenant_id=seeded_tenant.id,
                         stored_filename=stored,
                         display_name=display_name,
-                        uploaded_by=UserId(f"u-{tenant.slug}"),
+                        uploaded_by=UserId(f"u-{seeded_tenant.slug}"),
                         mimetype="text/markdown",
                         size_bytes=10,
                         openrag_document_id=seeded_document_id,
