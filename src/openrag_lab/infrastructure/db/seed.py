@@ -150,23 +150,23 @@ async def _seed_identity_locked(session: AsyncSession) -> None:
 
     # Global roles
     existing_global_names = set((await session.scalars(select(GlobalRoleModel.name))).all())
-    for role_name, permission_names in GLOBAL_ROLES.items():
-        name_value = role_name.value
+    for global_role_name, permission_names in GLOBAL_ROLES.items():
+        name_value = global_role_name.value
         if name_value not in existing_global_names:
-            role = GlobalRoleModel(
+            global_role = GlobalRoleModel(
                 id=f"global-role-{name_value}",
                 name=name_value,
                 description=f"Built-in global role: {name_value}",
                 is_system=True,
             )
-            session.add(role)
+            session.add(global_role)
         else:
-            role = (
+            global_role = (
                 await session.scalars(
                     select(GlobalRoleModel).where(GlobalRoleModel.name == name_value)
                 )
             ).one()
-        role.permissions = [
+        global_role.permissions = [
             permission_by_name[p] for p in permission_names if p in permission_by_name
         ]
 

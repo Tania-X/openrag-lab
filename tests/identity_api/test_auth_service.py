@@ -61,8 +61,8 @@ async def test_register_login_and_admin_create_user() -> None:
         assert TENANT_ROLES[TenantRoleName.TENANT_ADMIN] <= permissions
 
     async with session_factory() as session:
-        service = UserService(session)
-        user = await service.create_user(
+        user_service = UserService(session)
+        user = await user_service.create_user(
             username="bob",
             password="bobpass",
             tenant_id=result["tenant_id"],

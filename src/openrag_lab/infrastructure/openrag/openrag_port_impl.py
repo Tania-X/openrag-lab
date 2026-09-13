@@ -20,7 +20,10 @@ class OpenRAGGateway:
 
     def __init__(
         self,
-        client_factory: Callable[..., OpenRAGClient] = OpenRAGClient,
+        # Deliberately loose: this is the seam tests inject a fake through, and a
+        # fake is not an OpenRAGClient subclass. What the client must provide is
+        # captured by the calls below, not by this annotation.
+        client_factory: Callable[..., Any] = OpenRAGClient,
         base_url: str | None = None,
         ingest_timeout: float | None = None,
     ) -> None:
@@ -28,7 +31,7 @@ class OpenRAGGateway:
         self._base_url = base_url
         self._ingest_timeout = ingest_timeout
 
-    def _client(self, api_key: str) -> OpenRAGClient:
+    def _client(self, api_key: str) -> Any:
         """Build a client for one tenant.
 
         The address is passed explicitly rather than left to the client's own

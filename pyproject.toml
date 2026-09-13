@@ -25,6 +25,8 @@ dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",
+    "mypy>=1.11",
+    "types-PyYAML>=6.0",
 ]
 
 [project.scripts]
@@ -36,6 +38,19 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/openrag_lab"]
+
+[tool.mypy]
+# 起步策略：默认检查 + 几个高价值严格项，而不是一次 --strict 铺开。
+# 实测基线（2026-09-12）：src+tests 下这套配置 0 错误；--strict 仍有约 38 条，
+# 后续可以按模块逐步收紧（domain/application 先严、infrastructure/legacy 后严）。
+python_version = "3.12"
+files = ["src", "tests"]
+check_untyped_defs = true        # 也检查没写类型标注的函数体
+warn_unused_ignores = true       # 过期的 # type: ignore 要清掉
+warn_redundant_casts = true
+no_implicit_optional = true      # = None 不再隐式当成 Optional
+strict_equality = true           # 类型不相交的比较直接报错
+show_error_codes = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

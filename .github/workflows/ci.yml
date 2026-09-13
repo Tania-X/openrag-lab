@@ -27,5 +27,10 @@ jobs:
       - name: Lint
         run: uv run ruff check src tests
 
+      # 静态类型检查：抓"类型不匹配 / Optional 未处理 / 变量承担两种类型"这类
+      # 编译器在 Java 里会拦、而 Python 运行时不管的问题。
+      - name: Type check
+        run: uv run mypy
+
       - name: Test
         run: uv run pytest
