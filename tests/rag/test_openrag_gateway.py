@@ -247,3 +247,44 @@ def test_concurrent_first_calls_build_one_client_per_key() -> None:
 
     assert built == ["tenant-a"], f"expected one build per key, got {built}"
     gateway.close()
+
+
+def test_eviction_does_not_close_a_client_that_is_in_use() -> None:
+    """评审第 1 轮(4 级)回归: 淘汰不能打断在途请求。
+
+    修复前 `_client` 的快路径无锁返回引用, 另一个线程淘汰同一条目时直接 close(),
+    那个正在 search/ingest 的请求就会失败; 用第 65 个 key 时必然触发淘汰。
+    现在条目带借用计数: 淘汰只标记, 最后一个借用结束时才关闭。
+    """
+    gateway = OpenRAGGateway(client_factory=FakeClient, max_cached_clients=1)
+
+    with gateway._borrow("tenant-a") as held:
+        _search(gateway, "tenant-b")           # 挤掉 tenant-a, 但它正被借用
+        assert held.closed is False, "在途请求的客户端不能被关闭"
+    assert held.closed is True, "借用结束后才关闭被淘汰的客户端"
+
+
+def test_close_defers_until_an_in_flight_borrow_ends() -> None:
+    """关闭进程时同样不能打断在途请求; 借用结束时才真正关闭。"""
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+
+    with gateway._borrow("tenant-a") as held:
+        gateway.close()
+        assert held.closed is False
+    assert held.closed is True
+
+
+def test_borrows_are_released_even_when_the_call_raises() -> None:
+    """借出必须靠 with 保证归还: 调用抛异常也不能让计数泄漏(否则该 client 永不关闭)。"""
+    class Boom(FakeClient):
+        def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
+            if self.api_key == "tenant-a":       # 只让第一个租户失败
+                raise RuntimeError("boom")
+            return super().search(query, **kwargs)
+
+    gateway = OpenRAGGateway(client_factory=Boom, max_cached_clients=1)
+    with pytest.raises(RuntimeError):
+        _search(gateway, "tenant-a")
+
+    _search(gateway, "tenant-b")               # 挤掉 tenant-a
+    assert Boom.instances[0].closed is True, "异常路径也必须归还借用"

@@ -12,7 +12,12 @@ Clients are **cached per API key** rather than built per call. Two reasons:
   and only formats it into a header later), so "one client for the process"
   would mix tenants. The cache key is therefore the key itself.
 
-The cache is bounded, and evicting an entry closes the client it drops.
+The cache is bounded. Eviction must **not** close a client that a worker thread
+is still using, so every entry carries a borrow count: a client is closed when
+it is evicted *and* nobody holds it, or (if evicted while in use) the moment the
+last borrow ends. Closing on eviction without that count would break in-flight
+requests — the 65th tenant would silently kill a request of the oldest one.
+
 Ownership moves to whoever created the gateway: the application closes it during
 shutdown (``interfaces.api.deps.close_rag_gateway``), tests close it themselves.
 """
@@ -21,7 +26,9 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +41,20 @@ logger = logging.getLogger(__name__)
 #: connection pool alive, so the ceiling bounds sockets rather than memory. A
 #: tenant pushed out of the cache is simply rebuilt on its next call.
 MAX_CACHED_CLIENTS = 64
+
+
+@dataclass
+class _PooledClient:
+    """One cached client, plus what the cache needs to close it safely.
+
+    ``refs`` counts in-flight borrowers: a client with ``refs > 0`` is being used
+    on a worker thread right now, so eviction may only *mark* it. ``evicted``
+    means "no longer in the cache"; whoever releases the last borrow closes it.
+    """
+
+    client: Any
+    refs: int = 0
+    evicted: bool = False
 
 
 class OpenRAGGateway:
@@ -57,38 +78,67 @@ class OpenRAGGateway:
         # is simply the first one. No LRU touch: a hot tenant that gets evicted
         # is rebuilt for one handshake, whereas touching on every call would
         # mean taking a lock on the hot path.
-        self._clients: dict[str, Any] = {}
+        self._clients: dict[str, _PooledClient] = {}
         self._clients_lock = threading.Lock()
 
-    def _client(self, api_key: str) -> Any:
-        """Return this tenant's client, building it on first use.
+    @contextmanager
+    def _borrow(self, api_key: str) -> Iterator[Any]:
+        """Lend this tenant's client for the duration of one call.
 
-        Callers must **not** close what they get back: the client outlives the
-        call, and closing it would drop the pool the next call wants to reuse.
-
-        Thread safety: gateway calls run on anyio worker threads, so two calls
-        for the same cold key can race. The lock plus a second look at the cache
-        keeps that to exactly one client per key.
+        The client must not be closed by the caller: it outlives the call, and
+        closing it would drop the pool the next call reuses. Returning it is
+        enough — leaving the block releases this borrow, which is what lets the
+        cache close an evicted client without cutting a request short.
         """
-        cached = self._clients.get(api_key)
-        if cached is not None:
-            return cached
+        entry = self._acquire(api_key)
+        try:
+            yield entry.client
+        finally:
+            self._release(entry)
 
-        evicted: Any = None
+    def _acquire(self, api_key: str) -> _PooledClient:
+        """Return this tenant's entry, building it on first use, and count us in.
+
+        Thread safety: calls run on anyio worker threads, so two calls for the
+        same cold key can race; the lock plus a second look keeps that to exactly
+        one client per key. Eviction happens here too, under the same lock, so a
+        key can never be both "in the cache" and "already closed".
+        """
         with self._clients_lock:
-            cached = self._clients.get(api_key)  # another thread may have won
-            if cached is None:
-                cached = self._build_client(api_key)
-                self._clients[api_key] = cached
-                if len(self._clients) > self._max_cached_clients:
-                    oldest_key = next(iter(self._clients))
-                    evicted = self._clients.pop(oldest_key)
-        if evicted is not None:
-            # Drop the pool outside the lock: other tenants should not wait on
-            # it, and the entry is already out of the cache.
-            self._close_client(evicted)
-            logger.info("Evicted a cached OpenRAG client (cache ceiling reached)")
-        return cached
+            entry = self._clients.get(api_key)
+            if entry is None:
+                entry = _PooledClient(client=self._build_client(api_key))
+                self._clients[api_key] = entry
+                self._evict_over_ceiling()
+            entry.refs += 1
+            return entry
+
+    def _evict_over_ceiling(self) -> None:
+        """Drop oldest entries until the cache fits. Caller holds the lock.
+
+        A dropped entry is only closed when nobody is using it; otherwise it is
+        marked and closed by ``_release`` when the last borrow ends. Closing it
+        here would fail an in-flight request on that tenant.
+        """
+        while len(self._clients) > self._max_cached_clients:
+            oldest_key = next(iter(self._clients))
+            entry = self._clients.pop(oldest_key)
+            entry.evicted = True
+            if entry.refs == 0:
+                self._close_client(entry.client)
+                logger.info("Evicted a cached OpenRAG client (cache ceiling reached)")
+            else:
+                logger.info(
+                    "Evicted an in-use OpenRAG client; it closes when the "
+                    "current call finishes (cache ceiling reached)"
+                )
+
+    def _release(self, entry: _PooledClient) -> None:
+        """End one borrow, closing the client if eviction is waiting for it."""
+        with self._clients_lock:
+            entry.refs -= 1
+            if entry.evicted and entry.refs == 0:
+                self._close_client(entry.client)
 
     def _build_client(self, api_key: str) -> Any:
         """Construct one client for ``api_key``.
@@ -110,12 +160,19 @@ class OpenRAGGateway:
         )
 
     def close(self) -> None:
-        """Close every cached client. Idempotent; safe to call at shutdown."""
+        """Close cached clients. Idempotent; safe to call at shutdown.
+
+        A client that a worker thread is still using is marked instead, and
+        closed by ``_release`` when that call returns — shutdown must not fail an
+        in-flight request either.
+        """
         with self._clients_lock:
-            clients = list(self._clients.values())
+            entries = list(self._clients.values())
             self._clients.clear()
-        for client in clients:
-            self._close_client(client)
+            for entry in entries:
+                entry.evicted = True
+                if entry.refs == 0:
+                    self._close_client(entry.client)
 
     @staticmethod
     def _close_client(client: Any) -> None:
@@ -141,8 +198,8 @@ class OpenRAGGateway:
         rerank_model: str | None = None,
         rerank_top_n: int | None = None,
     ) -> dict[str, Any]:
-        client = self._client(api_key)
-        return client.search(
+        with self._borrow(api_key) as client:
+            return client.search(
             query,
             filters=filters,
             limit=limit,
@@ -161,8 +218,8 @@ class OpenRAGGateway:
         limit: int,
         score_threshold: float,
     ) -> dict[str, Any]:
-        client = self._client(api_key)
-        return client.chat(
+        with self._borrow(api_key) as client:
+            return client.chat(
             message,
             filters=filters,
             limit=limit,
@@ -176,19 +233,19 @@ class OpenRAGGateway:
         stored_filename: str,
         path: Path,
     ) -> dict[str, Any]:
-        client = self._client(api_key)
-        # wait=True: the caller only registers the document once OpenRAG
-        # reports the task finished, so the registry never claims a
-        # document that failed to index.
-        return client.ingest_file(path, wait=True, filename=stored_filename)
+        with self._borrow(api_key) as client:
+            # wait=True: the caller only registers the document once OpenRAG
+            # reports the task finished, so the registry never claims a
+            # document that failed to index.
+            return client.ingest_file(path, wait=True, filename=stored_filename)
 
     def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
-        client = self._client(api_key)
-        return client.delete_document(stored_filename)
+        with self._borrow(api_key) as client:
+            return client.delete_document(stored_filename)
 
     def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
-        client = self._client(api_key)
-        for entry in client.list_files():
-            if entry.get("filename") == stored_filename:
-                return str(entry.get("document_id") or "") or None
+        with self._borrow(api_key) as client:
+            for entry in client.list_files():
+                if entry.get("filename") == stored_filename:
+                    return str(entry.get("document_id") or "") or None
         return None
