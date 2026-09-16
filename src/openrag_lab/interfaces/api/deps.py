@@ -32,6 +32,15 @@ DbSession = Annotated[AsyncSession, Depends(get_session)]
 #: The gateway owns the per-tenant HTTP client cache, so it has to outlive a
 #: request: building one per request would recreate every connection pool. It
 #: is therefore a process-level singleton, closed from the app lifespan.
+#:
+#: Known assumption (raised in review, kept deliberately): **one app instance per
+#: process**. Two FastAPI apps sharing this module-level singleton would fight
+#: over it — the first app's shutdown closes the clients the second one is using.
+#: Test suites are unaffected (they override this dependency), and production runs
+#: one app per process. Moving the gateway into ``app.state`` (created and closed
+#: in the lifespan) is the shape to adopt if that ever stops being true; it was
+#: left out here to stay consistent with ``infrastructure/db/session.py``, which
+#: uses the same module-level pattern.
 _gateway: RagGateway | None = None
 
 

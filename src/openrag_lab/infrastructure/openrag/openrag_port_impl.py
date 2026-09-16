@@ -77,7 +77,9 @@ class OpenRAGGateway:
         self._client_factory = client_factory
         self._base_url = base_url
         self._ingest_timeout = ingest_timeout
-        self._max_cached_clients = max_cached_clients
+        # A ceiling below 1 cannot mean "no cache" here: every borrow needs an
+        # entry, and a ceiling of 0 would evict the entry it is about to lend.
+        self._max_cached_clients = max(1, max_cached_clients)
         # Insertion order *is* eviction order (dicts keep it), so the oldest key
         # is simply the first one. No LRU touch: touching would mean writing on
         # every call. The price of a wrong guess is real, though — rebuilding a
@@ -130,11 +132,16 @@ class OpenRAGGateway:
             entry = self._clients.get(api_key)
             if entry is None:
                 entry = _PooledClient(client=built)
+                # Count the borrow *before* the entry is visible to eviction.
+                # With a ceiling of 0 the new entry is the only candidate for
+                # being dropped, and closing it here would hand the caller a
+                # closed client (and close it twice on release).
+                entry.refs += 1
                 self._clients[api_key] = entry
                 self._evict_over_ceiling()
             else:
                 self._close_client(built)  # lost the race; do not leak it
-            entry.refs += 1
+                entry.refs += 1
             return entry
 
     def _evict_over_ceiling(self) -> None:

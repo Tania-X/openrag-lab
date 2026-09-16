@@ -339,3 +339,22 @@ def test_borrows_are_released_even_when_the_call_raises() -> None:
 
     _search(gateway, "tenant-b")               # 挤掉 tenant-a
     assert Boom.instances[0].closed is True, "异常路径也必须归还借用"
+
+
+def test_a_zero_ceiling_does_not_hand_out_a_closed_client() -> None:
+    """评审第 3 轮(4 级)回归: 上限被钳到 1, 且新条目先计数再参与淘汰。
+
+    修复前顺序是"入缓存 → 淘汰 → refs += 1": 上限为 0 时新条目正是唯一淘汰候选,
+    会被 pop + close(refs 仍为 0), 然后才 +1 并借给调用方 —— 调用方拿到已关闭的 client,
+    归还时还会重复关闭。
+    """
+    gateway = OpenRAGGateway(client_factory=FakeClient, max_cached_clients=0)
+    assert gateway._max_cached_clients == 1, "上限应被钳制为至少 1"
+
+    _search(gateway, "tenant-a")
+
+    client = FakeClient.instances[-1]
+    assert client.closed is False, "借出的 client 不能被关闭"
+    assert len(client.calls) == 1, "调用必须真的发出去"
+    gateway.close()
+    assert client.closed is True

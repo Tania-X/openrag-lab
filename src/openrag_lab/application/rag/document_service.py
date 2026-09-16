@@ -48,6 +48,11 @@ logger = logging.getLogger(__name__)
 #: queues behind uploads" to "uploads queue behind each other".
 INGEST_MAX_CONCURRENCY = 8
 
+# Built at import time on purpose. Review asked whether a module-level limiter is
+# safe across event loops (tests call anyio.run several times); measured on anyio
+# 4.14 it is — the primitives are backend-agnostic there, and a limiter shared
+# across sequential loops (contended, with waiters) works. Loop binding was an
+# anyio 3 concern, so a downgrade below 4 would need this revisited.
 _INGEST_LIMITER = anyio.CapacityLimiter(INGEST_MAX_CONCURRENCY)
 
 
