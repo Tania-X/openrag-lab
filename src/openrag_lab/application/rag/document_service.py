@@ -17,6 +17,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+import anyio
 from anyio import to_thread
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +34,26 @@ from openrag_lab.infrastructure.db.repositories.identity import SqlDocumentRepos
 from openrag_lab.infrastructure.openrag.tenant_scope import resolve_tenant_scope
 
 logger = logging.getLogger(__name__)
+
+#: How many uploads/deletes may hold a worker thread at once.
+#:
+#: Every gateway call is blocking, so it runs in an anyio worker thread. The
+#: default pool is 40 threads and is shared by *all* offloaded calls, while an
+#: upload can hold its thread for the whole ingest timeout (300s by default).
+#: Without a separate ceiling a burst of uploads parks the pool and the
+#: millisecond-scale searches queue behind them.
+#:
+#: Mutations get their own limiter; reads (search, chat, document id lookup)
+#: stay on the default pool. The worst case then degrades from "everything
+#: queues behind uploads" to "uploads queue behind each other".
+INGEST_MAX_CONCURRENCY = 8
+
+# Built at import time on purpose. Review asked whether a module-level limiter is
+# safe across event loops (tests call anyio.run several times); measured on anyio
+# 4.14 it is — the primitives are backend-agnostic there, and a limiter shared
+# across sequential loops (contended, with waiters) works. Loop binding was an
+# anyio 3 concern, so a downgrade below 4 would need this revisited.
+_INGEST_LIMITER = anyio.CapacityLimiter(INGEST_MAX_CONCURRENCY)
 
 
 def basename_for_storage(raw_filename: str) -> str:
@@ -108,7 +129,8 @@ class DocumentService:
                 api_key=api_key,
                 stored_filename=stored_filename,
                 path=path,
-            )
+            ),
+            limiter=_INGEST_LIMITER,
         )
         _ensure_ingested(task, stored_filename)
         # The task payload does not carry the document id, so read it back once
@@ -196,7 +218,8 @@ class DocumentService:
             lambda: self._gateway.delete_document(
                 api_key=resolve_tenant_scope(tenant).api_key,
                 stored_filename=stored_filename,
-            )
+            ),
+            limiter=_INGEST_LIMITER,
         )
         await self._commit_registry(
             action="remove",

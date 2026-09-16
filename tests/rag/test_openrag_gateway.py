@@ -3,11 +3,18 @@
 The endpoint tests replace the gateway with a fake, so they cannot catch a
 mistake in the adapter itself (wrong address, lost filters, leaked client).
 These tests cover that layer with a fake *client*.
+
+Client lifecycle is part of the contract now: a client is built once per API
+key, kept open for reuse (it owns a connection pool) and closed when the
+gateway closes. Tests below pin reuse, the cache ceiling and shutdown.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -74,6 +81,9 @@ def test_search_targets_the_configured_openrag_instance(
     client = FakeClient.instances[-1]
     assert client.base_url == "http://openrag.internal:9999"
     assert client.api_key == "orag_tenant_key"
+    # Reused across calls, so it stays open; the gateway closes it at shutdown.
+    assert client.closed is False
+    gateway.close()
     assert client.closed is True
 
 
@@ -90,6 +100,8 @@ def test_chat_targets_the_configured_openrag_instance() -> None:
     client = FakeClient.instances[-1]
     assert client.base_url == get_settings().openrag_base_url
     assert client.api_key == "orag_tenant_key"
+    assert client.closed is False
+    gateway.close()
     assert client.closed is True
 
 
@@ -152,3 +164,197 @@ def test_an_explicit_base_url_wins_over_settings() -> None:
         score_threshold=0.0,
     )
     assert FakeClient.instances[-1].base_url == "http://explicit:1234"
+
+
+# ── client lifecycle: reuse, ceiling, shutdown ─────────────────────────────
+
+
+def _search(gateway: OpenRAGGateway, api_key: str) -> None:
+    gateway.search(
+        api_key=api_key,
+        query="q",
+        filters={"data_sources": []},
+        limit=1,
+        score_threshold=0.0,
+    )
+
+
+def test_calls_with_the_same_key_reuse_one_client() -> None:
+    """The pool is the point: repeat calls must not rebuild the client."""
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-a")
+
+    assert len(FakeClient.instances) == 1
+    gateway.close()
+
+
+def test_different_tenants_never_share_a_client() -> None:
+    """The API key is bound at construction, so it is the cache key too."""
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-b")
+
+    assert [c.api_key for c in FakeClient.instances] == ["tenant-a", "tenant-b"]
+    gateway.close()
+
+
+def test_close_releases_every_cached_client_and_is_idempotent() -> None:
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-b")
+
+    gateway.close()
+    assert all(c.closed for c in FakeClient.instances)
+
+    gateway.close()  # second call must not raise
+    assert all(c.closed for c in FakeClient.instances)
+
+
+def test_the_cache_ceiling_evicts_the_oldest_client() -> None:
+    """Sockets are bounded: past the ceiling the oldest client is closed."""
+    gateway = OpenRAGGateway(client_factory=FakeClient, max_cached_clients=2)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-b")
+    _search(gateway, "tenant-c")
+
+    first, second, third = FakeClient.instances
+    assert first.closed is True          # evicted, and its pool released
+    assert second.closed is False
+    assert third.closed is False
+
+    _search(gateway, "tenant-a")         # rebuilt on demand
+    assert len(FakeClient.instances) == 4
+    gateway.close()
+
+
+def test_concurrent_first_calls_share_one_live_client() -> None:
+    """冷启动竞争: 调用者必须收敛到**同一个存活 client**, 多建的落选者要立即关闭。
+
+    构建在锁外进行(评审第 2 轮修订), 所以竞争允许"多建一个再丢弃"; 真正的不变量是
+    "缓存里只有一个、所有调用都用它、落选者不泄漏"。旧实现锁内构建能保证只建一个,
+    代价是把其它租户的首次调用一起堵住(见下一条测试)。
+    """
+    build_lock = threading.Lock()
+    built: list[str] = []
+
+    class SlowClient(FakeClient):
+        def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+            with build_lock:
+                built.append(api_key)
+            time.sleep(0.05)  # 拉长构建窗口, 让竞争真的发生
+            super().__init__(base_url, api_key, ingest_timeout)
+
+    gateway = OpenRAGGateway(client_factory=SlowClient)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: _search(gateway, "tenant-a"), range(8)))
+
+    live = [c for c in SlowClient.instances if not c.closed]
+    assert len(live) == 1, f"应只剩一个存活 client, 实际 {len(live)}"
+    surviving = live[0]
+    # 落选者(如果竞争发生了)必须被关闭, 不能泄漏
+    assert all(c is surviving or c.closed for c in SlowClient.instances)
+    # 8 次检索全部落在同一个存活 client 上
+    assert sum(len(c.calls) for c in SlowClient.instances) == 8
+    assert len(surviving.calls) == 8
+    gateway.close()
+
+
+def test_building_one_tenant_does_not_block_another() -> None:
+    """构造必须在锁外: 一个租户的慢构建不能堵住另一个租户的冷启动。
+
+    修复前 `_acquire` 在 `_clients_lock` 内调用 `_build_client`; 实测构造一个
+    `httpx.Client` 约 12ms(SSL 上下文/证书), 自定义 factory 可能更慢 —— 那段时间里
+    所有租户的**首次调用**(以及借用计数)都得排队。
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingBuild(FakeClient):
+        def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+            if api_key == "tenant-slow":
+                started.set()
+                release.wait()  # 一直卡住, 直到本测试显式放行
+            super().__init__(base_url, api_key, ingest_timeout)
+
+    gateway = OpenRAGGateway(client_factory=BlockingBuild)
+    slow = threading.Thread(target=lambda: _search(gateway, "tenant-slow"), daemon=True)
+    slow.start()
+    assert started.wait(timeout=5), "慢构建线程没能开始"
+
+    fast_done = threading.Event()
+
+    def fast_call() -> None:
+        _search(gateway, "tenant-fast")
+        fast_done.set()
+
+    threading.Thread(target=fast_call, daemon=True).start()
+    try:
+        # 关键断言: **限时**完成。锁内构建时这里会等到慢构建放行(旧行为), 因此会失败。
+        assert fast_done.wait(timeout=2), "另一个租户的冷启动被慢构建堵住了(构建必须在锁外)"
+        assert gateway._clients["tenant-fast"].client.api_key == "tenant-fast"
+    finally:
+        release.set()
+        slow.join(timeout=5)
+        gateway.close()
+
+
+def test_eviction_does_not_close_a_client_that_is_in_use() -> None:
+    """评审第 1 轮(4 级)回归: 淘汰不能打断在途请求。
+
+    修复前 `_client` 的快路径无锁返回引用, 另一个线程淘汰同一条目时直接 close(),
+    那个正在 search/ingest 的请求就会失败; 用第 65 个 key 时必然触发淘汰。
+    现在条目带借用计数: 淘汰只标记, 最后一个借用结束时才关闭。
+    """
+    gateway = OpenRAGGateway(client_factory=FakeClient, max_cached_clients=1)
+
+    with gateway._borrow("tenant-a") as held:
+        _search(gateway, "tenant-b")           # 挤掉 tenant-a, 但它正被借用
+        assert held.closed is False, "在途请求的客户端不能被关闭"
+    assert held.closed is True, "借用结束后才关闭被淘汰的客户端"
+
+
+def test_close_defers_until_an_in_flight_borrow_ends() -> None:
+    """关闭进程时同样不能打断在途请求; 借用结束时才真正关闭。"""
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+
+    with gateway._borrow("tenant-a") as held:
+        gateway.close()
+        assert held.closed is False
+    assert held.closed is True
+
+
+def test_borrows_are_released_even_when_the_call_raises() -> None:
+    """借出必须靠 with 保证归还: 调用抛异常也不能让计数泄漏(否则该 client 永不关闭)。"""
+    class Boom(FakeClient):
+        def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
+            if self.api_key == "tenant-a":       # 只让第一个租户失败
+                raise RuntimeError("boom")
+            return super().search(query, **kwargs)
+
+    gateway = OpenRAGGateway(client_factory=Boom, max_cached_clients=1)
+    with pytest.raises(RuntimeError):
+        _search(gateway, "tenant-a")
+
+    _search(gateway, "tenant-b")               # 挤掉 tenant-a
+    assert Boom.instances[0].closed is True, "异常路径也必须归还借用"
+
+
+def test_a_zero_ceiling_does_not_hand_out_a_closed_client() -> None:
+    """评审第 3 轮(4 级)回归: 上限被钳到 1, 且新条目先计数再参与淘汰。
+
+    修复前顺序是"入缓存 → 淘汰 → refs += 1": 上限为 0 时新条目正是唯一淘汰候选,
+    会被 pop + close(refs 仍为 0), 然后才 +1 并借给调用方 —— 调用方拿到已关闭的 client,
+    归还时还会重复关闭。
+    """
+    gateway = OpenRAGGateway(client_factory=FakeClient, max_cached_clients=0)
+    assert gateway._max_cached_clients == 1, "上限应被钳制为至少 1"
+
+    _search(gateway, "tenant-a")
+
+    client = FakeClient.instances[-1]
+    assert client.closed is False, "借出的 client 不能被关闭"
+    assert len(client.calls) == 1, "调用必须真的发出去"
+    gateway.close()
+    assert client.closed is True

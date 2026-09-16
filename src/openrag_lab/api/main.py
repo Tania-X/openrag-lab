@@ -15,6 +15,7 @@ from openrag_lab.config import get_settings
 from openrag_lab.infrastructure.db.integrity import find_tenants_with_invalid_slug
 from openrag_lab.infrastructure.db.seed import seed_identity
 from openrag_lab.infrastructure.db.session import create_all, init_db, reset_db
+from openrag_lab.interfaces.api.deps import close_rag_gateway
 from openrag_lab.interfaces.api.errors import register_exception_handlers
 from openrag_lab.interfaces.api.routers import (
     auth,
@@ -75,6 +76,9 @@ async def lifespan(app: FastAPI):
         reset_db()
         raise
     finally:
+        # The gateway holds per-tenant HTTP clients (connection pools); they are
+        # process-scoped, so they are released here rather than per request.
+        close_rag_gateway()
         await engine.dispose()
 
 

@@ -29,9 +29,43 @@ bearer_scheme = HTTPBearer(auto_error=False)
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 
 
+#: The gateway owns the per-tenant HTTP client cache, so it has to outlive a
+#: request: building one per request would recreate every connection pool. It
+#: is therefore a process-level singleton, closed from the app lifespan.
+#:
+#: Known assumption (raised in review, kept deliberately): **one app instance per
+#: process**. Two FastAPI apps sharing this module-level singleton would fight
+#: over it — the first app's shutdown closes the clients the second one is using.
+#: Test suites are unaffected (they override this dependency), and production runs
+#: one app per process. Moving the gateway into ``app.state`` (created and closed
+#: in the lifespan) is the shape to adopt if that ever stops being true; it was
+#: left out here to stay consistent with ``infrastructure/db/session.py``, which
+#: uses the same module-level pattern.
+_gateway: RagGateway | None = None
+
+
 def get_rag_gateway() -> RagGateway:
-    """Provide the OpenRAG gateway (overridden in tests)."""
-    return OpenRAGGateway(ingest_timeout=get_settings().upload_ingest_timeout_seconds)
+    """Provide the shared OpenRAG gateway (overridden in tests)."""
+    global _gateway
+    if _gateway is None:
+        _gateway = OpenRAGGateway(
+            ingest_timeout=get_settings().upload_ingest_timeout_seconds
+        )
+    return _gateway
+
+
+def close_rag_gateway() -> None:
+    """Close the shared gateway's cached clients, if one was ever built.
+
+    Called from the lifespan shutdown path. ``None`` is not an error: an
+    instance that never served a RAG request has nothing to close.
+    """
+    global _gateway
+    gateway, _gateway = _gateway, None
+    if gateway is not None:
+        close = getattr(gateway, "close", None)
+        if callable(close):
+            close()
 
 
 RagGatewayDep = Annotated[RagGateway, Depends(get_rag_gateway)]
