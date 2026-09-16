@@ -3,11 +3,18 @@
 The endpoint tests replace the gateway with a fake, so they cannot catch a
 mistake in the adapter itself (wrong address, lost filters, leaked client).
 These tests cover that layer with a fake *client*.
+
+Client lifecycle is part of the contract now: a client is built once per API
+key, kept open for reuse (it owns a connection pool) and closed when the
+gateway closes. Tests below pin reuse, the cache ceiling and shutdown.
 """
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
@@ -74,6 +81,9 @@ def test_search_targets_the_configured_openrag_instance(
     client = FakeClient.instances[-1]
     assert client.base_url == "http://openrag.internal:9999"
     assert client.api_key == "orag_tenant_key"
+    # Reused across calls, so it stays open; the gateway closes it at shutdown.
+    assert client.closed is False
+    gateway.close()
     assert client.closed is True
 
 
@@ -90,6 +100,8 @@ def test_chat_targets_the_configured_openrag_instance() -> None:
     client = FakeClient.instances[-1]
     assert client.base_url == get_settings().openrag_base_url
     assert client.api_key == "orag_tenant_key"
+    assert client.closed is False
+    gateway.close()
     assert client.closed is True
 
 
@@ -152,3 +164,86 @@ def test_an_explicit_base_url_wins_over_settings() -> None:
         score_threshold=0.0,
     )
     assert FakeClient.instances[-1].base_url == "http://explicit:1234"
+
+
+# ── client lifecycle: reuse, ceiling, shutdown ─────────────────────────────
+
+
+def _search(gateway: OpenRAGGateway, api_key: str) -> None:
+    gateway.search(
+        api_key=api_key,
+        query="q",
+        filters={"data_sources": []},
+        limit=1,
+        score_threshold=0.0,
+    )
+
+
+def test_calls_with_the_same_key_reuse_one_client() -> None:
+    """The pool is the point: repeat calls must not rebuild the client."""
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-a")
+
+    assert len(FakeClient.instances) == 1
+    gateway.close()
+
+
+def test_different_tenants_never_share_a_client() -> None:
+    """The API key is bound at construction, so it is the cache key too."""
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-b")
+
+    assert [c.api_key for c in FakeClient.instances] == ["tenant-a", "tenant-b"]
+    gateway.close()
+
+
+def test_close_releases_every_cached_client_and_is_idempotent() -> None:
+    gateway = OpenRAGGateway(client_factory=FakeClient)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-b")
+
+    gateway.close()
+    assert all(c.closed for c in FakeClient.instances)
+
+    gateway.close()  # second call must not raise
+    assert all(c.closed for c in FakeClient.instances)
+
+
+def test_the_cache_ceiling_evicts_the_oldest_client() -> None:
+    """Sockets are bounded: past the ceiling the oldest client is closed."""
+    gateway = OpenRAGGateway(client_factory=FakeClient, max_cached_clients=2)
+    _search(gateway, "tenant-a")
+    _search(gateway, "tenant-b")
+    _search(gateway, "tenant-c")
+
+    first, second, third = FakeClient.instances
+    assert first.closed is True          # evicted, and its pool released
+    assert second.closed is False
+    assert third.closed is False
+
+    _search(gateway, "tenant-a")         # rebuilt on demand
+    assert len(FakeClient.instances) == 4
+    gateway.close()
+
+
+def test_concurrent_first_calls_build_one_client_per_key() -> None:
+    """The gateway runs on worker threads: a cold key must not build twice."""
+    built: list[str] = []
+    build_lock = threading.Lock()
+
+    class SlowClient(FakeClient):
+        def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+            with build_lock:
+                built.append(api_key)
+            time.sleep(0.05)  # widen the window two threads could race in
+            super().__init__(base_url, api_key, ingest_timeout)
+
+    gateway = OpenRAGGateway(client_factory=SlowClient)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _: _search(gateway, "tenant-a"), range(8)))
+
+    assert built == ["tenant-a"], f"expected one build per key, got {built}"
+    gateway.close()
