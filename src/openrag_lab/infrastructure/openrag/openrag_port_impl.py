@@ -12,6 +12,10 @@ Clients are **cached per API key** rather than built per call. Two reasons:
   and only formats it into a header later), so "one client for the process"
   would mix tenants. The cache key is therefore the key itself.
 
+The cache lock only ever guards dictionary work and the borrow counters; client
+construction and closing happen outside it (the exception is closing an entry
+that nobody holds, which is O(1) and keeps the "evicted" state consistent).
+
 The cache is bounded. Eviction must **not** close a client that a worker thread
 is still using, so every entry carries a borrow count: a client is closed when
 it is evicted *and* nobody holds it, or (if evicted while in use) the moment the
@@ -75,9 +79,10 @@ class OpenRAGGateway:
         self._ingest_timeout = ingest_timeout
         self._max_cached_clients = max_cached_clients
         # Insertion order *is* eviction order (dicts keep it), so the oldest key
-        # is simply the first one. No LRU touch: a hot tenant that gets evicted
-        # is rebuilt for one handshake, whereas touching on every call would
-        # mean taking a lock on the hot path.
+        # is simply the first one. No LRU touch: touching would mean writing on
+        # every call. The price of a wrong guess is real, though — rebuilding a
+        # client costs ~12ms of construction plus a fresh handshake — which is
+        # why the ceiling is set well above the tenant count this phase expects.
         self._clients: dict[str, _PooledClient] = {}
         self._clients_lock = threading.Lock()
 
@@ -99,17 +104,36 @@ class OpenRAGGateway:
     def _acquire(self, api_key: str) -> _PooledClient:
         """Return this tenant's entry, building it on first use, and count us in.
 
-        Thread safety: calls run on anyio worker threads, so two calls for the
-        same cold key can race; the lock plus a second look keeps that to exactly
-        one client per key. Eviction happens here too, under the same lock, so a
-        key can never be both "in the cache" and "already closed".
+        Lock discipline (评审第 2 轮修订):
+
+        * taking the borrow count happens **under the lock** — otherwise a key
+          could be evicted (and closed, because ``refs`` still read 0) between
+          the lookup and the increment, which is exactly the in-flight failure
+          the count exists to prevent;
+        * **construction happens outside the lock**: building an ``httpx.Client``
+          costs ~12ms (SSL context, cert loading) and a custom factory may do
+          more, so holding the lock there would serialize every tenant's first
+          call behind it.
+
+        Building outside means two threads can race on the same cold key. The
+        loser's client is closed immediately: one wasted construction is cheaper
+        than blocking every other tenant on the lock.
         """
         with self._clients_lock:
             entry = self._clients.get(api_key)
+            if entry is not None:
+                entry.refs += 1
+                return entry
+
+        built = self._build_client(api_key)
+        with self._clients_lock:
+            entry = self._clients.get(api_key)
             if entry is None:
-                entry = _PooledClient(client=self._build_client(api_key))
+                entry = _PooledClient(client=built)
                 self._clients[api_key] = entry
                 self._evict_over_ceiling()
+            else:
+                self._close_client(built)  # lost the race; do not leak it
             entry.refs += 1
             return entry
 

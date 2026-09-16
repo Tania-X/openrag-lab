@@ -229,24 +229,75 @@ def test_the_cache_ceiling_evicts_the_oldest_client() -> None:
     gateway.close()
 
 
-def test_concurrent_first_calls_build_one_client_per_key() -> None:
-    """The gateway runs on worker threads: a cold key must not build twice."""
-    built: list[str] = []
+def test_concurrent_first_calls_share_one_live_client() -> None:
+    """冷启动竞争: 调用者必须收敛到**同一个存活 client**, 多建的落选者要立即关闭。
+
+    构建在锁外进行(评审第 2 轮修订), 所以竞争允许"多建一个再丢弃"; 真正的不变量是
+    "缓存里只有一个、所有调用都用它、落选者不泄漏"。旧实现锁内构建能保证只建一个,
+    代价是把其它租户的首次调用一起堵住(见下一条测试)。
+    """
     build_lock = threading.Lock()
+    built: list[str] = []
 
     class SlowClient(FakeClient):
         def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
             with build_lock:
                 built.append(api_key)
-            time.sleep(0.05)  # widen the window two threads could race in
+            time.sleep(0.05)  # 拉长构建窗口, 让竞争真的发生
             super().__init__(base_url, api_key, ingest_timeout)
 
     gateway = OpenRAGGateway(client_factory=SlowClient)
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(lambda _: _search(gateway, "tenant-a"), range(8)))
 
-    assert built == ["tenant-a"], f"expected one build per key, got {built}"
+    live = [c for c in SlowClient.instances if not c.closed]
+    assert len(live) == 1, f"应只剩一个存活 client, 实际 {len(live)}"
+    surviving = live[0]
+    # 落选者(如果竞争发生了)必须被关闭, 不能泄漏
+    assert all(c is surviving or c.closed for c in SlowClient.instances)
+    # 8 次检索全部落在同一个存活 client 上
+    assert sum(len(c.calls) for c in SlowClient.instances) == 8
+    assert len(surviving.calls) == 8
     gateway.close()
+
+
+def test_building_one_tenant_does_not_block_another() -> None:
+    """构造必须在锁外: 一个租户的慢构建不能堵住另一个租户的冷启动。
+
+    修复前 `_acquire` 在 `_clients_lock` 内调用 `_build_client`; 实测构造一个
+    `httpx.Client` 约 12ms(SSL 上下文/证书), 自定义 factory 可能更慢 —— 那段时间里
+    所有租户的**首次调用**(以及借用计数)都得排队。
+    """
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingBuild(FakeClient):
+        def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+            if api_key == "tenant-slow":
+                started.set()
+                release.wait()  # 一直卡住, 直到本测试显式放行
+            super().__init__(base_url, api_key, ingest_timeout)
+
+    gateway = OpenRAGGateway(client_factory=BlockingBuild)
+    slow = threading.Thread(target=lambda: _search(gateway, "tenant-slow"), daemon=True)
+    slow.start()
+    assert started.wait(timeout=5), "慢构建线程没能开始"
+
+    fast_done = threading.Event()
+
+    def fast_call() -> None:
+        _search(gateway, "tenant-fast")
+        fast_done.set()
+
+    threading.Thread(target=fast_call, daemon=True).start()
+    try:
+        # 关键断言: **限时**完成。锁内构建时这里会等到慢构建放行(旧行为), 因此会失败。
+        assert fast_done.wait(timeout=2), "另一个租户的冷启动被慢构建堵住了(构建必须在锁外)"
+        assert gateway._clients["tenant-fast"].client.api_key == "tenant-fast"
+    finally:
+        release.set()
+        slow.join(timeout=5)
+        gateway.close()
 
 
 def test_eviction_does_not_close_a_client_that_is_in_use() -> None:
