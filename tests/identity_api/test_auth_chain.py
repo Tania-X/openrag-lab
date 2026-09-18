@@ -108,6 +108,23 @@ async def test_invalid_token_also_carries_the_challenge(tmp_path: Path) -> None:
     assert response.headers.get("WWW-Authenticate") == "Bearer"
 
 
+async def test_login_failure_is_401_without_a_bearer_challenge(tmp_path: Path) -> None:
+    """契约明确区分两种 401: 受保护接口缺/坏 token 带挑战头, **登录失败不带**。
+
+    登录不是 Bearer 挑战 —— 客户端该做的是提交正确凭证, 而不是"带 token 重试"。
+    这条测试把 `docs/api-contract.md` §2.1 那句话钉住, 否则文档与实现会悄悄分叉。
+    """
+    settings = get_settings()
+    async with _app_with_admin(tmp_path) as (client, _):
+        response = await client.post(
+            "/api/auth/login",
+            json={"username": settings.bootstrap_admin_username, "password": "wrong-password"},
+        )
+
+    assert response.status_code == 401
+    assert "WWW-Authenticate" not in response.headers
+
+
 async def test_permission_denial_is_generic_but_logged(tmp_path: Path, caplog) -> None:
     """403 响应不回显权限名, 但日志里必须有 —— 否则 403 无法排查。"""
     async with _app_with_admin(tmp_path) as (_, factory):

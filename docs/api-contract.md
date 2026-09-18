@@ -39,7 +39,7 @@ OpenSearch / Langflow / new-api
 - 状态码约定：
 
 ```text
-401 未登录 / token 无效 / 调用者账号被禁用
+401 未登录 / token 无效 / 调用者账号被禁用 / 登录凭证错误
 403 权限不足、跨租户（非 super_admin）、租户被禁用
 404 目标租户不存在
 400 请求无法按原样满足（含租户文档数超过检索作用域上限）
@@ -48,8 +48,11 @@ OpenSearch / Langflow / new-api
 503 服务端配置缺失（例如未配置 OPENRAG_API_KEY）
 ```
 
-- `401` 响应带 `WWW-Authenticate: Bearer`（RFC 7235）。服务端用
-  `HTTPBearer(auto_error=False)` 自己产出这些响应，因此这个挑战头也要自己带上。
+- `401` 的**挑战头分两种**（RFC 7235，且与实现一致）：
+  - 受保护接口因**缺 token / token 无效**返回的 401 → **带** `WWW-Authenticate: Bearer`
+    （服务端用 `HTTPBearer(auto_error=False)` 自己产出响应，这个头也由自己带上）；
+  - `POST /api/auth/login` 因**凭证错误**返回的 401 → **不带**：登录不是 Bearer 挑战，
+    客户端该做的是提交正确凭证，而不是"带 token 重试"。
 - **"账号被禁用"是 401，"租户被禁用"是 403**：前者说明凭证已不再指向一个有效主体
   （与 token 过期同类，重新认证是唯一出路）；后者说明主体有效、只是其作用域被关闭。
   两者都在 `get_current_user` 里判定，所有受保护接口共用。
