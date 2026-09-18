@@ -103,20 +103,27 @@ class AuthService:
             raise InvalidOperationError("User is disabled")
         return self._token_response(user)
 
-    async def me(self, user_id: str, tenant_id: str) -> dict:
-        user = await self._user_repo.find_by_id(UserId(user_id))
-        if user is None:
-            raise NotFoundError("User not found")
-        if user.tenant_id.value != tenant_id:
-            raise NotFoundError("User not found")
-        if user.status != UserStatus.ACTIVE:
-            raise InvalidOperationError("User is disabled")
-        permissions = await self._rbac.effective_permissions(user.id.value, tenant_id)
+    async def me(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str,
+        username: str,
+        display_name: str | None,
+    ) -> dict:
+        """Return the caller's identity and the permissions it holds.
+
+        The user row is *not* loaded here: ``get_current_user`` already loaded
+        and validated it (exists, belongs to the token's tenant, still active)
+        and passes the identity down. Re-querying it made ``/api/auth/me`` the
+        one endpoint whose cost doubled for nothing.
+        """
+        permissions = await self._rbac.effective_permissions(user_id, tenant_id)
         return {
-            "user_id": user.id.value,
-            "tenant_id": user.tenant_id.value,
-            "username": user.username,
-            "display_name": user.display_name,
+            "user_id": user_id,
+            "tenant_id": tenant_id,
+            "username": username,
+            "display_name": display_name,
             "permissions": sorted(permissions),
         }
 

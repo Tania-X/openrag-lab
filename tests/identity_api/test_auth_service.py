@@ -37,7 +37,12 @@ async def test_register_login_and_admin_create_user() -> None:
             settings.bootstrap_admin_password,
         )
         assert token["username"] == settings.bootstrap_admin_username
-        admin_me = await service.me(token["user_id"], token["tenant_id"])
+        admin_me = await service.me(
+            user_id=token["user_id"],
+            tenant_id=token["tenant_id"],
+            username=token["username"],
+            display_name=settings.bootstrap_admin_username,
+        )
         assert "tenants:write" in admin_me["permissions"]
         # super_admin is a *global* role and holds the whole permission catalog,
         # so per-tenant permissions like search:use/chat:use are included even
@@ -54,7 +59,12 @@ async def test_register_login_and_admin_create_user() -> None:
 
     async with session_factory() as session:
         service = AuthService(session)
-        me = await service.me(result["user_id"], result["tenant_id"])
+        me = await service.me(
+            user_id=result["user_id"],
+            tenant_id=result["tenant_id"],
+            username=result["username"],
+            display_name="alice",
+        )
         permissions = set(me["permissions"])
         assert "users:write" in permissions
         assert "tenants:write" not in permissions

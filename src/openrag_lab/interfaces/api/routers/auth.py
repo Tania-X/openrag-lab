@@ -64,5 +64,10 @@ async def me(
     current_user: Annotated[CurrentUser, Depends(get_current_user)],
 ) -> MeResponse:
     service = AuthService(session)
-    result = await service.me(current_user.user_id, current_user.tenant_id)
+    result = await service.me(
+        user_id=current_user.user_id,
+        tenant_id=current_user.tenant_id,
+        username=current_user.username,
+        display_name=current_user.display_name,
+    )
     return MeResponse(**result)

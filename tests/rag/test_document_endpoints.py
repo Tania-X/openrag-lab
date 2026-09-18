@@ -41,9 +41,9 @@ from openrag_lab.interfaces.api.errors import register_exception_handlers
 from openrag_lab.interfaces.api.routers import documents
 
 TEST_API_KEY = "orag_test_key"
-ACME_TENANT = CurrentUser(user_id="u-acme", tenant_id="t-acme", username="alice")
-GLOBEX_TENANT = CurrentUser(user_id="u-globex", tenant_id="t-globex", username="bob")
-ROOT = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
+ACME_TENANT = CurrentUser(user_id="u-acme", tenant_id="t-acme", username="alice", display_name="Alice")
+GLOBEX_TENANT = CurrentUser(user_id="u-globex", tenant_id="t-globex", username="bob", display_name="Bob")
+ROOT = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root", display_name="Root")
 
 
 @pytest.fixture(autouse=True)
