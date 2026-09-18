@@ -467,3 +467,39 @@ PR #10（OpenAPI 契约改为生成 + 守卫）第 4 轮 AI Review 通过（78/1
 
 > 两条都是 `severity 2`，不影响已合并契约的正确性；已随类型检查门禁同一个 PR 修完。
 
+
+## 十二、登记表状态机 P1（2026-09-16）
+
+设计见 `docs/document-registry-state-design.md`；本节只记 P1 落地时要紧的事。
+
+### 为什么要做
+
+登记表原本只有"存在/不存在"两种状态，**无法表达"正在索引"**。最坏的不一致是
+"远端索引成功、本地登记失败"：那行根本不存在 → 检索看不见它（方向安全），
+但它也**无法通过 API 删除**（删除必须先有登记行），只能翻日志人工发现。
+
+### P1 改了什么
+
+- 加 `status`（`indexing` / `indexed` / `failed`）+ `status_reason`（内部，不进 API）
+- 上传顺序反转为**意图先行**：`INSERT(status=indexing) + commit` → 调 OpenRAG →
+  晋升 `indexed`，失败则标 `failed`（原因落在 `status_reason`）
+- **检索边界只取 `indexed`**（`list_stored_filenames`）——这是本期的核心不变量：
+  "列表里能看到"与"能被检索到"从此是两件事
+- 同名并发上传 / 删除在途文档 → **409**（新增 `ConflictError`）
+- 迁移：`openrag-lab migrate-registry-status`（幂等；`create_all()` 不会给已有表加列）
+
+### 实测与回归
+
+- 本地 58 行真实数据的迁移结果：`status` 全部回填 `indexed`，二次执行输出
+  "Nothing to do"（幂等）
+- 189 个测试通过；6 个 P1 守卫做过变异验证（去掉边界过滤 / 去掉意图提交 /
+  放宽晋升前置 / 去掉 409 映射 / 去掉删除守卫 / 破坏迁移幂等，逐个都能让测试变红）
+
+### 两条值得记住的坑
+
+1. **契约测试会拦住"给响应模型加字段"**：`DocumentOut` 加 `status` 后，
+   `test_the_generated_contract_matches_the_committed_file` 立刻失败——按提示跑
+   `openrag-lab export-openapi` 重新生成 `openrag/openrag-lab.yaml` 即可。
+2. **`AsyncSession` 与并发**：写并发测试时容易顺手让多个任务共用一条 session
+   （会出 SAWarning / CancelledError）。应用里是"一请求一 session"，测试也必须照做
+   （阶段 0 那次也踩过同样的坑）。

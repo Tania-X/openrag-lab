@@ -13,6 +13,11 @@ class DocumentOut(BaseModel):
     size_bytes: int
     openrag_document_id: str | None = None
     uploaded_by: str
+    #: Registry lifecycle (indexing / indexed / failed). Only `indexed` documents
+    #: take part in retrieval, so the client needs this to explain why a listed
+    #: document is not searchable yet. `status_reason` stays internal: it quotes
+    #: upstream error text.
+    status: str
     created_at: str
     updated_at: str
 

@@ -26,9 +26,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from openrag_lab.domain.identity.models import (
     MAX_DISPLAY_NAME_LENGTH,
+    MAX_STATUS_REASON_LENGTH,
     MAX_STORED_FILENAME_LENGTH,
 )
-from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
+from openrag_lab.domain.shared.enums import DocumentStatus, TenantStatus, UserStatus
 from openrag_lab.infrastructure.db.base import Base
 
 role_permissions = Table(
@@ -180,6 +181,15 @@ class DocumentModel(Base):
     mimetype: Mapped[str] = mapped_column(String(255), default="application/octet-stream")
     size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     openrag_document_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Portable enum: VARCHAR + validation, same shape as tenants.status/users.status.
+    # DEFAULT 'indexed' is what the migration backfills existing rows with.
+    status: Mapped[DocumentStatus] = mapped_column(
+        SAEnum(DocumentStatus, native_enum=False, validate_strings=True, length=16),
+        default=DocumentStatus.INDEXED,
+    )
+    status_reason: Mapped[str | None] = mapped_column(
+        String(MAX_STATUS_REASON_LENGTH), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

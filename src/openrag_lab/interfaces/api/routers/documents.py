@@ -45,6 +45,7 @@ def _to_out(document: Document) -> DocumentOut:
         size_bytes=document.size_bytes,
         openrag_document_id=document.openrag_document_id,
         uploaded_by=document.uploaded_by.value,
+        status=document.status.value,
         created_at=document.created_at.isoformat(),
         updated_at=document.updated_at.isoformat(),
     )

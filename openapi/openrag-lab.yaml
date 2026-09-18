@@ -151,6 +151,9 @@ components:
         size_bytes:
           title: Size Bytes
           type: integer
+        status:
+          title: Status
+          type: string
         stored_filename:
           title: Stored Filename
           type: string
@@ -167,6 +170,7 @@ components:
       - mimetype
       - size_bytes
       - uploaded_by
+      - status
       - created_at
       - updated_at
       title: DocumentOut

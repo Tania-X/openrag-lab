@@ -178,6 +178,7 @@ super_admin    传一个不存在的 tenant_id → 404
       "size_bytes": 1709,
       "openrag_document_id": "ONjbpbZ-8UkjaTkuX_FbUV9D",
       "uploaded_by": "…",
+      "status": "indexed",
       "created_at": "2026-09-12T…",
       "updated_at": "2026-09-12T…"
     }
@@ -190,6 +191,17 @@ super_admin    传一个不存在的 tenant_id → 404
 `openrag_document_id` 是 OpenRAG 侧的文档 id：入库任务本身不回传它，
 服务端在入库成功后回查一次（best effort，查不到就是 `null`），
 同名重传换了内容会刷新成新 id。
+
+`status` 是登记表的状态机（`docs/document-registry-state-design.md`）：
+
+```text
+indexing  已落本地意图, 正在调 OpenRAG —— **不进检索边界**, 列表可见
+indexed   远端已确认, 正常可用 —— 只有这个状态参与 data_sources 过滤
+failed    入库或晋升失败(原因留在服务端日志/登记表内部字段)
+```
+
+也就是说：**"列表里能看到"与"能被检索到"是两件事**。未就绪的文档会出现在列表里
+（否则用户会以为上传丢件），但不会进入检索边界。重传同名文件即重试（`failed` → 重新索引）。
 
 ### 2.6 POST /api/documents/ingest
 
@@ -214,13 +226,19 @@ tenant_id  可选（multipart 表单字段），只有 super_admin 可用
 1. 客户端文件名先被降为 basename（浏览器会送 C:\fakepath\x.pdf）
 2. 再由领域规则生成存储名 <slug>/<basename>：
    含路径分隔符、以点开头、超长的名字一律 400
-3. 同步等待 OpenRAG 入库任务完成；失败/超时不写登记表
-4. 同名重传 = 替换（OpenRAG replace_duplicates=true，登记表 update）
-5. 上传成功才登记，因此登记表里不会出现没索引成功的文档
+3. **先落本地意图**（status=indexing + 提交），再同步等待 OpenRAG 入库任务完成；
+   这样进程在任何一步崩溃, 都留下一行可被对账发现的状态, 而不是"远端有文件、本地没记录"
+4. 成功后晋升 status=indexed；失败则标 status=failed（原因记在服务端）并返回错误
+5. 同名重传 = 替换（OpenRAG replace_duplicates=true，登记表 update）；
+   若该名字**正在索引中**，返回 409（等它结束再传）
 ```
 
-成功返回 201 与一条 `DocumentOut`（字段同 2.5）。状态码：400 文件名不合法或入库失败、
-403 无权限或跨租户、413 超过上传上限、502 调用 OpenRAG 失败。
+成功返回 201 与一条 `DocumentOut`（字段同 2.5，`status` 为 `indexed`）。
+状态码：400 文件名不合法或入库失败、403 无权限或跨租户、409 同名文档正在索引、
+413 超过上传上限、502 调用 OpenRAG 失败。
+
+**入库失败会留下 `status=failed` 的登记行**（请求本身仍然报错）。这是刻意的：
+失败必须留痕、可重试、可对账，而不是只存在于日志里。该行不进检索边界。
 
 上传是**长事务**：请求会同步等待 OpenRAG 的入库任务完成，等待上限由
 `UPLOAD_INGEST_TIMEOUT_SECONDS` 控制（默认 300 秒），期间占用一个工作线程。
@@ -243,7 +261,8 @@ tenant_id  可选（multipart 表单字段），只有 super_admin 可用
 ```
 
 ```text
-未登记的文档 → 404（因此无法删除别的租户文档：那是 acme/xxx，本租户从未登记）
+未登记的文档        → 404（因此无法删除别的租户文档：那是 acme/xxx，本租户从未登记）
+正在索引中的文档    → 409（避免与在途上传的晋升互相踩；等它结束再删）
 ```
 
 响应：
