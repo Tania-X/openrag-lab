@@ -38,8 +38,8 @@ from openrag_lab.interfaces.api.errors import register_exception_handlers
 from openrag_lab.interfaces.api.routers import chat, search
 
 TEST_API_KEY = "orag_test_key"
-ACME_USER = CurrentUser(user_id="u-acme", tenant_id="t-acme", username="alice")
-GLOBEX_USER = CurrentUser(user_id="u-globex", tenant_id="t-globex", username="bob")
+ACME_USER = CurrentUser(user_id="u-acme", tenant_id="t-acme", username="alice", display_name="Alice")
+GLOBEX_USER = CurrentUser(user_id="u-globex", tenant_id="t-globex", username="bob", display_name="Bob")
 
 
 @pytest.fixture(autouse=True)
@@ -266,7 +266,7 @@ async def test_cross_tenant_tenant_id_is_rejected_for_non_super_admin() -> None:
 
 
 async def test_super_admin_can_scope_to_another_tenant() -> None:
-    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
+    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root", display_name="Root")
     async with _build_client(
         actor=root,
         documents=[("t-acme", "report.md"), ("t-globex", "secret.md")],
@@ -284,7 +284,7 @@ async def test_super_admin_can_scope_to_another_tenant() -> None:
 
 
 async def test_super_admin_defaults_to_their_own_tenant() -> None:
-    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
+    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root", display_name="Root")
     async with _build_client(
         actor=root,
         documents=[("t-acme", "report.md"), ("t-globex", "secret.md")],
@@ -361,7 +361,7 @@ async def test_invalid_search_payloads_are_rejected(payload: dict[str, Any]) -> 
 
 async def test_unknown_tenant_id_is_not_found_not_a_server_error() -> None:
     """A malformed tenant id is just an unknown tenant: 404, never 500."""
-    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root")
+    root = CurrentUser(user_id="u-root", tenant_id="t-acme", username="root", display_name="Root")
     async with _build_client(actor=root) as (client, _):
         response = await client.post(
             "/api/search", json={"query": "报表", "tenant_id": "not-a-uuid"}

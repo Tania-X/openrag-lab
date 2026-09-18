@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from typing import Annotated
 
@@ -24,7 +25,29 @@ from openrag_lab.infrastructure.db.session import get_session
 from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
 from openrag_lab.infrastructure.security.jwt import decode_access_token
 
+logger = logging.getLogger(__name__)
+
 bearer_scheme = HTTPBearer(auto_error=False)
+
+#: RFC 7235: a 401 must carry the challenge for the scheme it wants. FastAPI's
+#: HTTPBearer would have sent this itself, but ``auto_error=False`` hands the
+#: response to us — so the header comes with the responsibility.
+_BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
+
+
+def _unauthorized(detail: str) -> HTTPException:
+    """Build this module's 401, with the bearer challenge attached.
+
+    The header mapping is copied per call rather than handing the same module-level
+    dict to every ``HTTPException``: Starlette only reads it today, but a mutable
+    object shared by every 401 in the process is one downstream in-place write away
+    from changing all of them.
+    """
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers=dict(_BEARER_CHALLENGE),
+    )
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
 
@@ -72,10 +95,23 @@ RagGatewayDep = Annotated[RagGateway, Depends(get_rag_gateway)]
 
 
 class CurrentUser:
-    def __init__(self, user_id: str, tenant_id: str, username: str) -> None:
+    """The authenticated principal: everything the request needs to act for it.
+
+    Carries ``display_name`` so endpoints like ``/api/auth/me`` can render the
+    identity without querying the user row a second time.
+    """
+
+    def __init__(
+        self,
+        user_id: str,
+        tenant_id: str,
+        username: str,
+        display_name: str | None = None,
+    ) -> None:
         self.user_id = user_id
         self.tenant_id = tenant_id
         self.username = username
+        self.display_name = display_name
 
 
 async def get_current_user(
@@ -83,31 +119,32 @@ async def get_current_user(
     session: DbSession,
 ) -> CurrentUser:
     if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required",
-        )
+        raise _unauthorized("Authentication required")
     try:
         payload = decode_access_token(credentials.credentials)
     except jwt.PyJWTError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-        ) from exc
+        raise _unauthorized("Invalid or expired token") from exc
 
     user_id = payload.get("sub")
     tenant_id = payload.get("tenant_id")
     if not user_id or not tenant_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise _unauthorized("Invalid token")
 
     user_repo = SqlUserRepository(session)
     user = await user_repo.find_by_id(UserId(user_id))
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise _unauthorized("User not found")
     if user.tenant_id.value != tenant_id:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+        raise _unauthorized("Invalid token")
+    # A disabled *user* answers 401, not 403: the token no longer identifies an
+    # active principal, so re-authenticating is the only remedy — the same
+    # treatment an expired token gets. A disabled *tenant* (below) is 403: there
+    # the principal is valid and only its scope is switched off. Raising 403 here
+    # would tell a disabled account "you are authenticated but not allowed",
+    # which invites it to keep trying. Both cases are in the contract
+    # (docs/api-contract.md §2.1).
     if user.status != UserStatus.ACTIVE:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User is disabled")
+        raise _unauthorized("User is disabled")
 
     # A disabled tenant means nobody acts on its behalf — including a global
     # super_admin who happens to belong to it (otherwise that account could
@@ -126,6 +163,7 @@ async def get_current_user(
         user_id=user.id.value,
         tenant_id=user.tenant_id.value,
         username=user.username,
+        display_name=user.display_name,
     )
 
 
@@ -138,6 +176,16 @@ def require_permission(permission: str) -> Callable:
         try:
             await rbac.assert_permission(current_user.user_id, current_user.tenant_id, permission)
         except PermissionDeniedError as exc:
+            # The response stays deliberately generic: an authenticated caller
+            # must not be able to enumerate the permission set by reading error
+            # messages. The detail belongs in the log instead, or a 403 becomes
+            # undebuggable ("which permission was missing, for whom?").
+            logger.warning(
+                "permission denied: user=%s tenant=%s need=%s",
+                current_user.user_id,
+                current_user.tenant_id,
+                permission,
+            )
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="permission_denied",
