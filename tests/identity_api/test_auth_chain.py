@@ -125,6 +125,24 @@ async def test_login_failure_is_401_without_a_bearer_challenge(tmp_path: Path) -
     assert "WWW-Authenticate" not in response.headers
 
 
+def test_each_401_gets_its_own_headers_mapping() -> None:
+    """评审第 3 轮(2 级)回归: 401 的 headers 不能是全局共享的同一个可变 dict。
+
+    Starlette 今天只读它, 但只要下游(中间件/自定义 handler)对 `exc.headers`
+    做一次原地写入, 之后进程里所有 401 都会被改到 —— 共享可变状态在热路径上不划算。
+    """
+    from openrag_lab.interfaces.api.deps import _unauthorized
+
+    first, second = _unauthorized("a"), _unauthorized("b")
+    first_headers, second_headers = dict(first.headers or {}), dict(second.headers or {})
+    assert first_headers == {"WWW-Authenticate": "Bearer"}
+    assert first.headers is not second.headers, "每次 401 必须是独立的 headers 映射"
+
+    # 模拟下游原地写入: 不能污染第二个 401 的 headers
+    first_headers["X-Polluted"] = "yes"
+    assert "X-Polluted" not in second_headers
+
+
 async def test_permission_denial_is_generic_but_logged(tmp_path: Path, caplog) -> None:
     """403 响应不回显权限名, 但日志里必须有 —— 否则 403 无法排查。"""
     async with _app_with_admin(tmp_path) as (_, factory):

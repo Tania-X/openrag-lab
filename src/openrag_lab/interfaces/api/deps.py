@@ -36,11 +36,17 @@ _BEARER_CHALLENGE = {"WWW-Authenticate": "Bearer"}
 
 
 def _unauthorized(detail: str) -> HTTPException:
-    """Build this module's 401, with the bearer challenge attached."""
+    """Build this module's 401, with the bearer challenge attached.
+
+    The header mapping is copied per call rather than handing the same module-level
+    dict to every ``HTTPException``: Starlette only reads it today, but a mutable
+    object shared by every 401 in the process is one downstream in-place write away
+    from changing all of them.
+    """
     return HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail=detail,
-        headers=_BEARER_CHALLENGE,
+        headers=dict(_BEARER_CHALLENGE),
     )
 
 DbSession = Annotated[AsyncSession, Depends(get_session)]
