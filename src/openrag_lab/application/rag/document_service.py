@@ -1,11 +1,17 @@
 """Document management scoped to the caller's tenant.
 
-Three rules shape this service:
+Four rules shape this service:
 
 * the *stored* filename is always ``<tenant namespace><name>``, derived by the
   domain (``Tenant.scope_filename``) rather than trusted from the client;
-* a document only enters the registry after OpenRAG reports a finished
-  ingestion task, so the registry never claims something that is not indexed;
+* **intent first**: the registry row is written (``INDEXING``) and committed
+  *before* OpenRAG is called, so a crash at any later point leaves a row that
+  reconciliation can find — previously the worst case was a remote document with
+  no local row at all, which nothing could see or delete
+  (docs/document-registry-state-design.md §5);
+* a row only becomes ``INDEXED`` (the only status that enters a retrieval scope)
+  after OpenRAG reports a finished ingestion task, and a failure marks it
+  ``FAILED`` with a reason instead of leaving only a log line;
 * deleting works from the registry outwards, so only documents a tenant has
   registered can be deleted.
 """
@@ -22,13 +28,18 @@ from anyio import to_thread
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.application.rag.retrieval_scope import RetrievalScopeResolver
-from openrag_lab.domain.identity.models import Document
+from openrag_lab.domain.identity.models import Document, Tenant
 from openrag_lab.domain.rag.documents import (
     SUPPORTED_DOCUMENT_EXTENSIONS,
     is_supported_document,
 )
 from openrag_lab.domain.rag.ports import RagGateway
-from openrag_lab.domain.shared.errors import InvalidOperationError, NotFoundError
+from openrag_lab.domain.shared.enums import DocumentStatus
+from openrag_lab.domain.shared.errors import (
+    ConflictError,
+    InvalidOperationError,
+    NotFoundError,
+)
 from openrag_lab.domain.shared.ids import DocumentId, UserId
 from openrag_lab.infrastructure.db.repositories.identity import SqlDocumentRepository
 from openrag_lab.infrastructure.openrag.tenant_scope import resolve_tenant_scope
@@ -124,41 +135,8 @@ class DocumentService:
             )
         api_key = resolve_tenant_scope(tenant).api_key
 
-        task = await to_thread.run_sync(
-            lambda: self._gateway.ingest_document(
-                api_key=api_key,
-                stored_filename=stored_filename,
-                path=path,
-            ),
-            limiter=_INGEST_LIMITER,
-        )
-        _ensure_ingested(task, stored_filename)
-        # The task payload does not carry the document id, so read it back once
-        # the document exists. Best effort: a miss leaves the field untouched.
-        resolved_id = await to_thread.run_sync(
-            lambda: self._gateway.find_document_id(
-                api_key=api_key, stored_filename=stored_filename
-            )
-        )
-
         existing = await self._documents.find_by_stored_filename(tenant.id, stored_filename)
-        if existing is not None:
-            # Re-upload replaces: OpenRAG was told replace_duplicates=true, so
-            # the stored document is already the new content.
-            existing.display_name = display_name
-            existing.mimetype = mimetype
-            existing.size_bytes = size_bytes
-            existing.uploaded_by = UserId(uploaded_by)
-            # Only overwrite an id we actually received: a replace-duplicates
-            # task need not echo one, and losing it would be a silent downgrade.
-            new_id = resolved_id
-            if new_id is not None:
-                existing.openrag_document_id = new_id
-            # A replacement changes the record, so surface it: updated_at is
-            # exposed by the API and would otherwise stay equal to created_at.
-            existing.touch()
-            document = existing
-        else:
+        if existing is None:
             document = Document(
                 id=DocumentId.generate(),
                 tenant_id=tenant.id,
@@ -167,15 +145,89 @@ class DocumentService:
                 uploaded_by=UserId(uploaded_by),
                 mimetype=mimetype,
                 size_bytes=size_bytes,
-                openrag_document_id=resolved_id,
+                status=DocumentStatus.INDEXING,
             )
+        else:
+            # Same name, same tenant: replace (was INDEXED) or retry (was FAILED).
+            # Still INDEXING means another upload owns this name right now, and
+            # mark_indexing() turns that into a ConflictError (409) rather than
+            # letting two callers drive the remote state.
+            document = existing
+            document.display_name = display_name
+            document.mimetype = mimetype
+            document.size_bytes = size_bytes
+            document.uploaded_by = UserId(uploaded_by)
+            document.mark_indexing()
+
+        # Intent first (design §5.1): this commit is what makes a crash
+        # discoverable — the row exists and says INDEXING, so reconciliation can
+        # ask OpenRAG what actually happened.
         await self._commit_registry(
-            action="register",
+            action="intent",
+            tenant_label=tenant.slug,
+            stored_filename=stored_filename,
+            save=lambda: self._documents.save(document),
+        )
+
+        try:
+            task = await to_thread.run_sync(
+                lambda: self._gateway.ingest_document(
+                    api_key=api_key,
+                    stored_filename=stored_filename,
+                    path=path,
+                ),
+                limiter=_INGEST_LIMITER,
+            )
+            _ensure_ingested(task, stored_filename)
+            # The task payload does not carry the document id, so read it back
+            # once the document exists. Best effort: a miss leaves the field
+            # untouched.
+            resolved_id = await to_thread.run_sync(
+                lambda: self._gateway.find_document_id(
+                    api_key=api_key, stored_filename=stored_filename
+                )
+            )
+        except Exception as exc:
+            # Record the failure on the row and re-raise: the caller still gets
+            # its 502, but the registry now shows what happened.
+            await self._mark_failed(document, tenant, stored_filename, exc)
+            raise
+
+        document.mark_indexed(resolved_id)
+        await self._commit_registry(
+            action="promote",
             tenant_label=tenant.slug,
             stored_filename=stored_filename,
             save=lambda: self._documents.save(document),
         )
         return document
+
+    async def _mark_failed(
+        self,
+        document: Document,
+        tenant: Tenant,
+        stored_filename: str,
+        exc: BaseException,
+    ) -> None:
+        """Record a failed ingestion on the row, without masking the failure.
+
+        If even this write fails the row stays ``INDEXING`` — also a
+        non-terminal state, so the crash path is still discoverable (design §5.1).
+        """
+        document.mark_failed(f"{type(exc).__name__}: {exc}")
+        try:
+            await self._commit_registry(
+                action="fail",
+                tenant_label=tenant.slug,
+                stored_filename=stored_filename,
+                save=lambda: self._documents.save(document),
+            )
+        except Exception:  # noqa: BLE001 - the original failure must win
+            logger.exception(
+                "Could not record the failure for %s; the row stays INDEXING "
+                "and reconciliation can still see it",
+                stored_filename,
+            )
 
     async def delete_document(
         self,
@@ -213,6 +265,12 @@ class DocumentService:
             # Deleting by name cannot reach anything the tenant did not
             # register, so an unknown name is simply not found.
             raise NotFoundError(f"Document not found: {display_name}")
+        if document.status is DocumentStatus.INDEXING:
+            # An upload of this name is in flight; letting the delete through
+            # would race with its promotion (and the promotion would re-insert
+            # the row we just removed). The proper fix is the DELETING state,
+            # which is stage P2 of the registry-state design.
+            raise ConflictError(f"Document is still being indexed: {display_name}")
 
         result = await to_thread.run_sync(
             lambda: self._gateway.delete_document(

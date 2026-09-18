@@ -10,13 +10,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
-from openrag_lab.domain.shared.errors import InvalidOperationError
+from openrag_lab.domain.shared.enums import DocumentStatus, TenantStatus, UserStatus
+from openrag_lab.domain.shared.errors import ConflictError, InvalidOperationError
 from openrag_lab.domain.shared.ids import DocumentId, GlobalRoleId, RoleId, TenantId, UserId
 
 #: Longest filename OpenRAG/openrag-lab will store for one document. The tenant
 #: namespace is part of it, so the caller-visible name is whatever remains.
 MAX_STORED_FILENAME_LENGTH = 512
+#: Upper bound for Document.status_reason: it quotes upstream error text, which
+#: can be arbitrarily long, and nothing reads more than the first line anyway.
+MAX_STATUS_REASON_LENGTH = 200
 
 #: Longest user-facing document name.
 MAX_DISPLAY_NAME_LENGTH = 512
@@ -247,6 +250,12 @@ class Document:
     mimetype: str = "application/octet-stream"
     size_bytes: int = 0
     openrag_document_id: str | None = None
+    #: Registry lifecycle. Defaults to INDEXED because a fully-constructed
+    #: Document describes a document that *is* usable; the upload path opts into
+    #: INDEXING explicitly before it calls OpenRAG.
+    status: DocumentStatus = DocumentStatus.INDEXED
+    #: Why the row is FAILED (kept internal: it can quote upstream errors).
+    status_reason: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -256,6 +265,50 @@ class Document:
         ``updated_at`` is a creation-time default, so any mutation has to bump
         it explicitly — the repository persists whatever the entity carries.
         """
+        self.updated_at = datetime.now(UTC)
+
+    def mark_indexing(self) -> None:
+        """Record the intent to index (or re-index) this document.
+
+        Reached from ``INDEXED`` (a replacement upload) and from ``FAILED`` (a
+        retry); the row itself is kept so ``created_at`` and any known OpenRAG id
+        survive. Already ``INDEXING`` is a conflict: two concurrent uploads of
+        the same name must not both drive the remote state.
+        """
+        if self.status is DocumentStatus.INDEXING:
+            raise ConflictError(f"Document is already being indexed: {self.display_name}")
+        self.status = DocumentStatus.INDEXING
+        self.status_reason = None
+        self.updated_at = datetime.now(UTC)
+
+    def mark_indexed(self, openrag_document_id: str | None = None) -> None:
+        """Promote to ``INDEXED``: OpenRAG confirmed the document.
+
+        Only valid from ``INDEXING`` — promotion without an intent would mean
+        the row skipped the state that makes a crash discoverable.
+        """
+        if self.status is not DocumentStatus.INDEXING:
+            raise InvalidOperationError(
+                f"Document is not being indexed (status={self.status.value}): "
+                f"{self.display_name}"
+            )
+        # Only overwrite an id we actually received: a replace-duplicates task
+        # need not echo one, and dropping the previous id is a silent downgrade.
+        if openrag_document_id:
+            self.openrag_document_id = openrag_document_id
+        self.status = DocumentStatus.INDEXED
+        self.status_reason = None
+        self.updated_at = datetime.now(UTC)
+
+    def mark_failed(self, reason: str) -> None:
+        """Record that ingestion failed, keeping the row discoverable."""
+        if self.status is not DocumentStatus.INDEXING:
+            raise InvalidOperationError(
+                f"Document is not being indexed (status={self.status.value}): "
+                f"{self.display_name}"
+            )
+        self.status = DocumentStatus.FAILED
+        self.status_reason = reason[:MAX_STATUS_REASON_LENGTH]
         self.updated_at = datetime.now(UTC)
 
     def rename(self, display_name: str) -> None:

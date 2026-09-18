@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from openrag_lab.config import ConfigurationError
 from openrag_lab.domain.shared.errors import (
+    ConflictError,
     DomainError,
     NotFoundError,
     PermissionDeniedError,
@@ -29,6 +30,12 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(PermissionDeniedError)
     async def _permission_denied(request, exc: PermissionDeniedError) -> JSONResponse:
         return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    @app.exception_handler(ConflictError)
+    async def _conflict(request, exc: ConflictError) -> JSONResponse:
+        # The request was fine; the resource is mid-transition (e.g. still being
+        # indexed), so retrying later is the remedy — that is a 409, not a 400.
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.exception_handler(DomainError)
     async def _domain_error(request, exc: DomainError) -> JSONResponse:

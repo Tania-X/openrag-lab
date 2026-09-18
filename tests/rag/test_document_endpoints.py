@@ -61,6 +61,7 @@ class FakeDocumentGateway:
         self.error: OpenRAGError | None = None
         self.staged_path: Path | None = None
         self.lookups: list[dict[str, Any]] = []
+        self.searches: list[dict[str, Any]] = []
         self.document_id: str | None = "orag-doc-1"
 
     def ingest_document(self, **kwargs: Any) -> dict[str, Any]:
@@ -84,6 +85,10 @@ class FakeDocumentGateway:
         self.lookups.append(kwargs)
         return self.document_id
 
+    def search(self, **kwargs: Any) -> dict[str, Any]:
+        self.searches.append(kwargs)
+        return {"results": [{"filename": "acme/whatever.md"}]}
+
 
 @asynccontextmanager
 async def _build_client(
@@ -91,7 +96,9 @@ async def _build_client(
     actor: CurrentUser | None,
     documents_seed: list[tuple[str, str]] | None = None,
     seeded_document_id: str | None = None,
+    seeded_status: str = "indexed",
     tenant_role: str | None = "user",
+    include_search: bool = False,
 ):
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
@@ -161,6 +168,7 @@ async def _build_client(
                 assert seeded_tenant is not None
                 stored = seeded_tenant.scope_filename(display_name)
                 from openrag_lab.domain.identity.models import Document
+                from openrag_lab.domain.shared.enums import DocumentStatus
                 from openrag_lab.domain.shared.ids import DocumentId
 
                 await document_repo.save(
@@ -173,6 +181,7 @@ async def _build_client(
                         mimetype="text/markdown",
                         size_bytes=10,
                         openrag_document_id=seeded_document_id,
+                        status=DocumentStatus(seeded_status),
                     )
                 )
             await session.commit()
@@ -180,6 +189,10 @@ async def _build_client(
         app = FastAPI()
         register_exception_handlers(app)
         app.include_router(documents.router)
+        if include_search:
+            from openrag_lab.interfaces.api.routers import search as search_router
+
+            app.include_router(search_router.router)
 
         gateway = FakeDocumentGateway()
 
@@ -333,14 +346,22 @@ async def test_upload_replaces_an_existing_document_instead_of_failing() -> None
     assert after["updated_at"] > before["updated_at"]
 
 
-async def test_failed_ingestion_leaves_no_registry_entry() -> None:
+async def test_failed_ingestion_leaves_a_discoverable_failed_row() -> None:
+    """失败不再"什么都不留", 而是留一条 FAILED 行(状态机 P1 的契约变更)。
+
+    旧契约是"失败的 ingest 不留登记行"—— 代价是失败只存在于日志里, 而进程崩溃
+    造成的不一致根本不可见。现在:
+    - 登记行存在、状态 `failed`、带原因(供对账/人工处理);
+    - 但它**不进检索边界**(I1: 只有 `INDEXED` 参与 `data_sources`)。
+    """
     async with _build_client(actor=ACME_TENANT) as (client, gateway):
         gateway.task = {"status": "failed", "failed_files": 1, "error": "unsupported"}
         response = await client.post("/api/documents/ingest", files=_upload("bad.md"))
         listing = (await client.get("/api/documents")).json()
     assert response.status_code == 400
     assert "did not complete" in response.json()["detail"]
-    assert listing["total"] == 0
+    assert listing["total"] == 1, "失败必须留痕, 而不是静默消失"
+    assert listing["files"][0]["status"] == "failed"
 
 
 async def test_openrag_failure_during_upload_is_a_bad_gateway() -> None:
@@ -609,3 +630,140 @@ class TestStatusCodeContract:
         ):
             response = await client.delete("/api/documents/never-uploaded.md")
         assert response.status_code == 404
+
+
+# ── 登记表状态机(P1): 意图先行 / 晋升 / 失败 / 冲突 ────────────────────────
+
+
+async def test_upload_promotes_the_row_to_indexed() -> None:
+    async with _build_client(actor=ACME_TENANT) as (client, _):
+        response = await client.post("/api/documents/ingest", files=_upload("ok.md"))
+        listing = (await client.get("/api/documents")).json()
+    assert response.status_code == 201
+    assert response.json()["status"] == "indexed"
+    assert listing["files"][0]["status"] == "indexed"
+
+
+async def test_promotion_failure_leaves_the_row_indexing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """晋升失败(本地写坏)时, 行必须留在 INDEXING —— 那正是对账能发现的状态。
+
+    这是设计 §5.1 的兜底论证: 意图已提交, 之后的任何崩溃路径都落在非终态一侧。
+    """
+    calls = {"n": 0}
+    original_save = SqlDocumentRepository.save
+
+    async def failing_on_promotion(self, document):
+        calls["n"] += 1
+        if calls["n"] >= 2:            # 第 1 次是意图, 第 2 次是晋升
+            raise RuntimeError("registry write failed")
+        await original_save(self, document)
+
+    monkeypatch.setattr(SqlDocumentRepository, "save", failing_on_promotion)
+
+    async with _build_client(actor=ACME_TENANT, include_search=True) as (client, _):
+        with pytest.raises(RuntimeError):
+            await client.post("/api/documents/ingest", files=_upload("ok.md"))
+        listing = (await client.get("/api/documents")).json()
+        scope = (await client.post("/api/search", json={"query": "x"})).json()
+
+    # 行在(意图已提交), 状态停在 INDEXING, 且**不进检索边界**
+    assert [f["status"] for f in listing["files"]] == ["indexing"]
+    assert scope["scope"]["document_count"] == 0
+
+
+async def test_failed_upload_can_be_retried_on_the_same_row() -> None:
+    """FAILED → (重试) → INDEXED: 行不变(created_at 保留), 状态收敛。"""
+    async with _build_client(
+        actor=ACME_TENANT, documents_seed=[("t-acme", "again.md")], seeded_status="failed"
+    ) as (client, gateway):
+        before = (await client.get("/api/documents")).json()["files"][0]
+        response = await client.post("/api/documents/ingest", files=_upload("again.md"))
+        after = (await client.get("/api/documents")).json()["files"][0]
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "indexed"
+    assert after["id"] == before["id"], "重试应复用同一行"
+    assert after["created_at"] == before["created_at"]
+
+
+async def test_upload_of_a_name_being_indexed_is_a_conflict() -> None:
+    """同一名字正在索引 → 409(而不是两个调用方一起驱动远端状态)。"""
+    async with _build_client(
+        actor=ACME_TENANT, documents_seed=[("t-acme", "busy.md")], seeded_status="indexing"
+    ) as (client, _):
+        response = await client.post("/api/documents/ingest", files=_upload("busy.md"))
+    assert response.status_code == 409
+    assert "being indexed" in response.json()["detail"]
+
+
+async def test_delete_of_a_name_being_indexed_is_a_conflict() -> None:
+    """删除也要让路: 否则会与在途上传的晋升互相踩(P2 的 DELETING 才是正解)。
+
+    用 developer 角色: `documents:delete` 在 user 角色里没有, 否则会先被 403 挡掉。
+    """
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "busy.md")],
+        seeded_status="indexing",
+        tenant_role="developer",
+    ) as (client, _):
+        response = await client.delete("/api/documents/busy.md")
+    assert response.status_code == 409
+
+
+async def test_a_name_being_indexed_is_not_searchable() -> None:
+    """在途文档不进检索边界 —— 即使它有登记行。"""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "busy.md")],
+        seeded_status="indexing",
+        include_search=True,
+    ) as (client, _):
+        payload = (await client.post("/api/search", json={"query": "x"})).json()
+    assert payload["scope"]["document_count"] == 0
+
+
+async def test_concurrent_uploads_of_one_name_produce_one_winner() -> None:
+    """同名并发上传: 一个成功、一个 409, 不产生两行。
+
+    用"网关阻塞 + 事件"把并发变成确定性顺序: A 的意图提交后阻塞在 ingest,
+    B 此时到达 → 必须 409(而不是也去调 OpenRAG)。
+    """
+    import anyio
+
+    async with _build_client(actor=ACME_TENANT) as (client, gateway):
+        in_flight = anyio.Event()
+        release = anyio.Event()
+        original_ingest = gateway.ingest_document
+
+        def blocking_ingest(**kwargs):
+            in_flight.set()
+            # 在 worker 线程里等一下, 让 B 有机会进来(它必须被 409 挡住)
+            anyio.from_thread.run(release.wait)
+            return original_ingest(**kwargs)
+
+        gateway.ingest_document = blocking_ingest
+
+        results: dict[str, int] = {}
+
+        async def first_upload() -> None:
+            response = await client.post("/api/documents/ingest", files=_upload("same.md"))
+            results["first"] = response.status_code
+
+        async def second_upload() -> None:
+            await in_flight.wait()
+            response = await client.post("/api/documents/ingest", files=_upload("same.md"))
+            results["second"] = response.status_code
+            release.set()
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(first_upload)
+            tg.start_soon(second_upload)
+
+        listing = (await client.get("/api/documents")).json()
+
+    assert results == {"first": 201, "second": 409}, results
+    assert listing["total"] == 1, "并发不能产生重复行"
+    assert listing["files"][0]["status"] == "indexed"

@@ -17,7 +17,7 @@ from openrag_lab.domain.identity.models import (
     User,
     UserGlobalRole,
 )
-from openrag_lab.domain.shared.enums import TenantStatus, UserStatus
+from openrag_lab.domain.shared.enums import DocumentStatus, TenantStatus, UserStatus
 from openrag_lab.domain.shared.errors import AlreadyExistsError, InvalidOperationError
 from openrag_lab.domain.shared.ids import (
     DocumentId,
@@ -49,6 +49,12 @@ def _coerce_tenant_status(value: TenantStatus | str) -> TenantStatus:
     if isinstance(value, TenantStatus):
         return value
     return TenantStatus(value)
+
+
+def _coerce_document_status(value: DocumentStatus | str) -> DocumentStatus:
+    if isinstance(value, DocumentStatus):
+        return value
+    return DocumentStatus(value)
 
 
 def _coerce_user_status(value: UserStatus | str) -> UserStatus:
@@ -434,6 +440,8 @@ def _document_to_domain(model: DocumentModel) -> Document:
         mimetype=model.mimetype,
         size_bytes=model.size_bytes,
         openrag_document_id=model.openrag_document_id,
+        status=_coerce_document_status(model.status),
+        status_reason=model.status_reason,
         created_at=_ensure_utc(model.created_at),
         updated_at=_ensure_utc(model.updated_at),
     )
@@ -449,6 +457,8 @@ def _document_to_model(document: Document) -> DocumentModel:
         mimetype=document.mimetype,
         size_bytes=document.size_bytes,
         openrag_document_id=document.openrag_document_id,
+        status=document.status,
+        status_reason=document.status_reason,
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
@@ -487,6 +497,8 @@ class SqlDocumentRepository:
         model.mimetype = document.mimetype
         model.size_bytes = document.size_bytes
         model.openrag_document_id = document.openrag_document_id
+        model.status = document.status
+        model.status_reason = document.status_reason
         model.updated_at = document.updated_at
 
     async def find_by_id(self, document_id: DocumentId) -> Document | None:
@@ -514,9 +526,20 @@ class SqlDocumentRepository:
         return [_document_to_domain(m) for m in result.scalars().all()]
 
     async def list_stored_filenames(self, tenant_id: TenantId) -> list[str]:
+        """The tenant's retrieval boundary: **only** documents OpenRAG confirmed.
+
+        This is invariant I1 of the registry-state design. An ``INDEXING`` or
+        ``FAILED`` row must never widen a search scope: the boundary is a
+        filename list, so a name that is not confirmed would either match
+        nothing (harmless) or — worse, if it were reused later — match content
+        the tenant did not finish registering.
+        """
         result = await self._session.execute(
             select(DocumentModel.stored_filename)
-            .where(DocumentModel.tenant_id == tenant_id.value)
+            .where(
+                DocumentModel.tenant_id == tenant_id.value,
+                DocumentModel.status == DocumentStatus.INDEXED,
+            )
             .order_by(DocumentModel.created_at)
         )
         return list(result.scalars().all())

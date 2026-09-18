@@ -70,6 +70,29 @@ def ingest(
 
 
 @app.command()
+def migrate_registry_status() -> None:
+    """Add the document registry status columns to an existing database.
+
+    Idempotent, and a no-op on a database created by the current code. Run once
+    after upgrading a database that predates the registry state machine
+    (docs/document-registry-state-design.md §8).
+    """
+    asyncio.run(_migrate_registry_status())
+
+
+async def _migrate_registry_status() -> None:
+    from openrag_lab.infrastructure.db.migrations import add_document_status_columns
+    from openrag_lab.infrastructure.db.session import init_db
+
+    engine = init_db(get_settings().database_url)
+    added = await add_document_status_columns(engine)
+    if added:
+        console.print(f"[green]Added columns:[/green] {', '.join(added)}")
+    else:
+        console.print("[yellow]Nothing to do:[/yellow] the registry schema is current.")
+
+
+@app.command()
 def list_files() -> None:
     """List currently ingested files in OpenRAG."""
     from openrag_lab.client import OpenRAGClient
