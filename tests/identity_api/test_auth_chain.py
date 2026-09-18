@@ -59,16 +59,6 @@ async def _app_with_admin(tmp_path: Path):
         await engine.dispose()
 
 
-async def _admin_session_and_token(factory):
-    """Log the bootstrap admin in; return (session-bound service, token response)."""
-    settings = get_settings()
-    session = factory()
-    token = await AuthService(session).login(
-        settings.bootstrap_admin_username, settings.bootstrap_admin_password
-    )
-    return session, token
-
-
 async def test_me_returns_the_identity_get_current_user_established(tmp_path: Path) -> None:
     """完整链路: 门0(HTTPBearer) → 门1(JWT + 用户/租户状态) → 端点。
 
