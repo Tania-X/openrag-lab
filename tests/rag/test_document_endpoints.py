@@ -22,7 +22,8 @@ from sqlalchemy.pool import StaticPool
 from openrag_lab.client import OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.identity.models import Tenant, TenantUserRole, User
-from openrag_lab.domain.shared.enums import GlobalRoleName
+from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
+from openrag_lab.domain.shared.enums import DocumentStatus, GlobalRoleName
 from openrag_lab.domain.shared.ids import TenantId, UserId
 from openrag_lab.infrastructure.db import models  # noqa: F401
 from openrag_lab.infrastructure.db.base import Base
@@ -52,13 +53,23 @@ def _pinned_openrag_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class FakeDocumentGateway:
-    """Records ingest/delete calls and can be told to fail."""
+    """Records ingest/delete calls and can be told to fail.
+
+    The delete outcome is selectable because the port contract has three of
+    them: a settled removal, a settled "nothing was there", and a call that
+    ended without a verdict (``RagOutcomeUnknownError``).
+    """
 
     def __init__(self) -> None:
         self.ingested: list[dict[str, Any]] = []
         self.deleted: list[dict[str, Any]] = []
         self.task: dict[str, Any] = {"status": "completed", "failed_files": 0}
-        self.error: OpenRAGError | None = None
+        self.error: Exception | None = None
+        #: Returned by ``delete_document`` when ``error`` is unset.
+        self.delete_result: dict[str, Any] = {
+            "deleted_chunks": 3,
+            "already_absent": False,
+        }
         self.staged_path: Path | None = None
         self.lookups: list[dict[str, Any]] = []
         self.searches: list[dict[str, Any]] = []
@@ -79,7 +90,7 @@ class FakeDocumentGateway:
         if self.error is not None:
             raise self.error
         self.deleted.append(kwargs)
-        return {"success": True, "deleted_chunks": 3}
+        return dict(self.delete_result)
 
     def find_document_id(self, **kwargs: Any) -> str | None:
         self.lookups.append(kwargs)
@@ -99,7 +110,14 @@ async def _build_client(
     seeded_status: str = "indexed",
     tenant_role: str | None = "user",
     include_search: bool = False,
+    registry: dict[str, Any] | None = None,
 ):
+    """Build an app over a fresh in-memory registry.
+
+    ``registry`` (optional out-parameter) receives the session factory and the
+    document repository, so a test can inspect rows the API deliberately hides —
+    notably ``DELETED`` tombstones.
+    """
     engine = create_async_engine(
         "sqlite+aiosqlite:///:memory:",
         poolclass=StaticPool,
@@ -110,6 +128,8 @@ async def _build_client(
             await conn.run_sync(Base.metadata.create_all)
 
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        if registry is not None:
+            registry["session_factory"] = session_factory
         async with session_factory() as session:
             await seed_identity(session)
             tenant_repo = SqlTenantRepository(session)
@@ -117,6 +137,8 @@ async def _build_client(
             role_repo = SqlTenantUserRoleRepository(session)
             global_role_repo = SqlUserGlobalRoleRepository(session)
             document_repo = SqlDocumentRepository(session)
+            if registry is not None:
+                registry["documents"] = document_repo
             role = (
                 await SqlRoleRepository(session).find_by_name(tenant_role)
                 if tenant_role is not None
@@ -470,22 +492,42 @@ async def test_upload_to_another_tenant_is_rejected_for_non_super_admin() -> Non
 # ── delete ────────────────────────────────────────────────────────────────
 
 
-async def test_delete_removes_from_openrag_and_the_registry() -> None:
+async def test_delete_removes_from_openrag_and_keeps_a_tombstone() -> None:
+    """P2 契约: 远端删掉, 本地留一行 `deleted` 墓碑, 列表里看不到它。
+
+    行不能被删掉 —— 它是"这个文件名曾经登记过"的唯一记录, 丢了就再也无法对账
+    (设计 §5.2)。
+    """
+    registry: dict[str, Any] = {}
     async with _build_client(
         actor=ACME_TENANT,
         documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-before-delete",  # 有 id 才能验"删除把它作废了"
         tenant_role="developer",
+        registry=registry,
     ) as (client, gateway):
         response = await client.delete("/api/documents/report.md")
         listing = (await client.get("/api/documents")).json()
+        # 引擎随 fixture 一起销毁(内存库), 所以墓碑必须在块内查
+        async with registry["session_factory"]() as session:
+            row = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+
     assert response.status_code == 200
     assert response.json() == {
         "filename": "report.md",
         "stored_filename": "acme/report.md",
         "deleted_chunks": 3,
+        "confirmed": True,
     }
     assert gateway.deleted[-1]["stored_filename"] == "acme/report.md"
-    assert listing["total"] == 0
+    assert listing["total"] == 0, "墓碑不进用户列表"
+    assert row is not None, "行必须留着(墓碑)"
+    assert row.status is DocumentStatus.DELETED
+    assert row.status_reason == "removed 3 chunk(s)"
+    assert row.remote_outcome_unknown is False
+    assert row.openrag_document_id is None, "远端已不存在, id 必须作废"
 
 
 async def test_delete_of_an_unregistered_document_is_not_found() -> None:
@@ -695,7 +737,8 @@ async def test_upload_of_a_name_being_indexed_is_a_conflict() -> None:
     ) as (client, _):
         response = await client.post("/api/documents/ingest", files=_upload("busy.md"))
     assert response.status_code == 409
-    assert "being indexed" in response.json()["detail"]
+    # 文案要点名是哪个状态在挡: 契约里有三种 409, 运维得能分清
+    assert "indexing" in response.json()["detail"]
 
 
 async def test_delete_of_a_name_being_indexed_is_a_conflict() -> None:
@@ -767,3 +810,234 @@ async def test_concurrent_uploads_of_one_name_produce_one_winner() -> None:
     assert results == {"first": 201, "second": 409}, results
     assert listing["total"] == 1, "并发不能产生重复行"
     assert listing["files"][0]["status"] == "indexed"
+
+
+# ── P2: 逻辑删除 / 墓碑 / 删除侧的比赛 ──────────────────────────────────────
+
+
+async def test_a_delete_without_a_verdict_is_reported_as_unconfirmed() -> None:
+    """远端超时: 算删除(名字已离开检索边界), 但必须回报 confirmed=false。
+
+    回答一句光秃秃的"已删除"等于让猜测冒充事实 —— 这正是本仓一直在防的那类错。
+    """
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        gateway.error = RagOutcomeUnknownError("timeout", operation="delete")
+        response = await client.delete("/api/documents/report.md")
+        async with registry["session_factory"]() as session:
+            row = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+
+    assert response.status_code == 200
+    assert response.json()["confirmed"] is False
+    assert response.json()["deleted_chunks"] == 0, "不知道删了几个, 就不能编一个数字"
+    assert row is not None and row.status is DocumentStatus.DELETED
+    assert row.remote_outcome_unknown is True, "未确认必须留痕(对账的工作清单)"
+
+
+async def test_a_refused_delete_leaves_the_row_deleting_and_answers_502() -> None:
+    """真拒绝(远端 5xx): 什么也没删掉, 行停在 DELETING —— 非终态, 可发现可重试。"""
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        gateway.error = OpenRAGError("boom", status_code=500)
+        response = await client.delete("/api/documents/report.md")
+        async with registry["session_factory"]() as session:
+            row = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+
+    assert response.status_code == 502
+    assert row is not None
+    assert row.status is DocumentStatus.DELETING, "删除失败不能回退成 INDEXED(那是撒谎)"
+    assert row.remote_outcome_unknown is False, "500 是明确的拒绝, 不是未知"
+    # 卡住的行必须说明为什么卡住(与 FAILED 路径对称), 否则运维只能去翻日志
+    assert row.status_reason is not None and "boom" in row.status_reason
+
+
+async def test_a_tombstone_is_not_found_and_is_not_deleted_again() -> None:
+    """P2 决策 1a: 删一个已经是墓碑的名字 → 404, 且不再碰远端。
+
+    重试未确认的删除是对账(P3)的职责 —— 把重试挂回请求路径, 等于让一个死掉的
+    请求成为唯一的修复机会。
+    """
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "gone.md")],
+        seeded_status="deleted",
+        tenant_role="developer",
+    ) as (client, gateway):
+        response = await client.delete("/api/documents/gone.md")
+
+    assert response.status_code == 404
+    assert gateway.deleted == [], "墓碑不该触发第二次远端删除"
+
+
+async def test_a_delete_cannot_start_twice() -> None:
+    """另一个删除正在驱动远端 → 409(否则两个调用方一起删同一份内容)。"""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "going.md")],
+        seeded_status="deleting",
+        tenant_role="developer",
+    ) as (client, gateway):
+        response = await client.delete("/api/documents/going.md")
+
+    assert response.status_code == 409
+    assert "deleting" in response.json()["detail"]
+    assert gateway.deleted == []
+
+
+async def test_an_upload_cannot_start_while_a_delete_is_in_flight() -> None:
+    """上传撞删除 → 409: 一个要建、一个要拆, 同时驱动远端必然互相覆盖。"""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "going.md")],
+        seeded_status="deleting",
+    ) as (client, gateway):
+        response = await client.post("/api/documents/ingest", files=_upload("going.md"))
+
+    assert response.status_code == 409
+    assert "deleting" in response.json()["detail"]
+    assert gateway.ingested == [], "冲突要在调 OpenRAG 之前就挡住"
+
+
+async def test_a_deleted_name_can_be_re_uploaded_and_resurrects_its_row() -> None:
+    """同名重传复活墓碑: 同一行、同一个 id、created_at 保留 —— 键没有被释放。"""
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        await client.delete("/api/documents/report.md")
+        async with registry["session_factory"]() as session:
+            tombstone = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+        assert tombstone is not None
+
+        response = await client.post("/api/documents/ingest", files=_upload("report.md"))
+        listing = (await client.get("/api/documents")).json()
+        async with registry["session_factory"]() as session:
+            revived = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "indexed"
+    assert revived is not None
+    assert revived.id == tombstone.id, "复活同一行, 不是新登记一行"
+    assert revived.created_at == tombstone.created_at, "首次登记时间要保留"
+    assert revived.status_reason is None
+    assert listing["total"] == 1, "复活后就该重新出现在列表里"
+
+
+async def test_a_tombstone_never_widens_the_retrieval_scope() -> None:
+    """墓碑同样不进检索边界(它只是没被删行, 不是仍可检索)。"""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "gone.md"), ("t-acme", "ready.md")],
+        seeded_status="indexed",
+        include_search=True,
+        tenant_role="developer",  # 删除需要 documents:delete
+    ) as (client, gateway):
+        # 先删掉一个, 再看检索范围
+        deleted = await client.delete("/api/documents/gone.md")
+        assert deleted.status_code == 200, deleted.text
+        payload = (await client.post("/api/search", json={"query": "x"})).json()
+
+    assert payload["scope"]["document_count"] == 1
+    assert gateway.searches[-1]["filters"]["data_sources"] == ["acme/ready.md"]
+
+
+async def test_a_resurrected_row_does_not_keep_the_deleted_document_id() -> None:
+    """评审提的那个场景: 删除后重传, 而这次 id 回查没查到东西。
+
+    `mark_indexed` 只在**真的收到** id 时才覆盖(best effort 查不到就保持原值),
+    所以如果删除时不清 id, 复活后的行会一直挂着一个已经被删掉的远端 id ——
+    而它在 API 响应里是可见的。删除那一刻就该作废它。
+    """
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-before-delete",
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        assert (await client.delete("/api/documents/report.md")).status_code == 200
+
+        gateway.document_id = None  # 回查未命中(best effort 会漏)
+        revived = await client.post("/api/documents/ingest", files=_upload("report.md"))
+        async with registry["session_factory"]() as session:
+            row = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+
+    assert revived.status_code == 201
+    assert revived.json()["openrag_document_id"] is None
+    assert row is not None
+    assert row.status is DocumentStatus.INDEXED
+    assert row.openrag_document_id is None, "旧 id 不能活过删除"
+
+
+async def test_a_replacement_upload_keeps_the_id_when_the_task_echoes_none() -> None:
+    """反向守卫: 替换上传(非删除)时, 查不到新 id 必须保留旧 id —— 那是静默降级。"""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-still-valid",
+    ) as (client, gateway):
+        gateway.document_id = None
+        response = await client.post("/api/documents/ingest", files=_upload("report.md"))
+
+    assert response.status_code == 201
+    assert response.json()["openrag_document_id"] == "orag-still-valid"
+
+
+async def test_a_refused_delete_stays_busy_for_the_api_and_is_left_to_reconciliation() -> None:
+    """被拒绝 → 行停 DELETING **且带原因**; 而 API 上的重试仍然是 409。
+
+    这不是遗漏, 是已经拍过的原则: 重试是 P3 对账的职责, 不挂回请求路径 ——
+    "把重试挂回请求路径, 等于让一个死掉的请求成为唯一的修复机会"(墓碑 404 那条决策)。
+    代价写进了设计稿 §10.2: P3 的重试入口必须能作用于 DELETING 行。
+
+    这条测试同时钉住两件事: 拒绝留下可发现的痕迹, 以及**状态没有移动**。
+    """
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        gateway.error = OpenRAGError("upstream 500", status_code=500)
+        refused = await client.delete("/api/documents/report.md")
+
+        async with registry["session_factory"]() as session:
+            stuck = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+        assert stuck is not None and stuck.status is DocumentStatus.DELETING
+        assert stuck.status_reason is not None and "upstream 500" in stuck.status_reason
+
+        # 再删一次: 名字仍然"忙"(DELETING) → 409。重试入口留给 P3 对账。
+        gateway.error = None
+        retried = await client.delete("/api/documents/report.md")
+
+    assert refused.status_code == 502
+    assert retried.status_code == 409
+    assert "deleting" in retried.json()["detail"]
+    assert gateway.deleted == [], "409 要在调 OpenRAG 之前就挡住"

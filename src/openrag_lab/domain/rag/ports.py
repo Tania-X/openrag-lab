@@ -16,6 +16,26 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
+class RagOutcomeUnknownError(RuntimeError):
+    """A gateway call ended without a verdict from OpenRAG.
+
+    Raised for transport-level failures (timeout, connection lost): the request
+    may have been applied remotely, may still be running, or may never have
+    arrived. The distinction from an ordinary failure is the whole point —
+    "OpenRAG refused" and "we do not know" call for different recovery, and
+    collapsing them is how a registry ends up asserting something it cannot
+    support.
+
+    Part of the port contract, so adapters raise it and the application never
+    has to interpret adapter-specific error shapes.
+    """
+
+    def __init__(self, message: str, *, operation: str = "") -> None:
+        super().__init__(message)
+        #: Which port method lost the verdict ("ingest"/"delete").
+        self.operation = operation
+
+
 class RagGateway(Protocol):
     """Access to OpenRAG scoped to one tenant's API key."""
 
@@ -51,12 +71,26 @@ class RagGateway(Protocol):
     ) -> dict[str, Any]:
         """Store ``path`` in OpenRAG under the tenant-namespaced name.
 
-        Returns OpenRAG's final ingestion task payload.
+        Returns OpenRAG's final ingestion task payload. Raises
+        :class:`RagOutcomeUnknownError` when no verdict was received — the
+        caller must not treat that as "nothing was written".
         """
         ...
 
     def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
-        """Remove every chunk stored under ``stored_filename``."""
+        """Remove every chunk stored under ``stored_filename``.
+
+        Returns ``{"deleted_chunks": int, "already_absent": bool}``. A normal
+        return means the outcome is **known**: either chunks were removed or
+        OpenRAG reported that nothing matched the name (``already_absent``) —
+        both make the name unusable for retrieval, so both are a settled delete.
+        Turning the 404 into a normal return keeps OpenRAG's status-code
+        convention inside the adapter, where it belongs.
+
+        Raises :class:`RagOutcomeUnknownError` when the outcome is unknown, and
+        the underlying error otherwise (a real refusal: the delete did not
+        happen).
+        """
         ...
 
     def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:

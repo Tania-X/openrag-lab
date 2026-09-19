@@ -13,7 +13,9 @@ Four rules shape this service:
   after OpenRAG reports a finished ingestion task, and a failure marks it
   ``FAILED`` with a reason instead of leaving only a log line;
 * deleting works from the registry outwards, so only documents a tenant has
-  registered can be deleted.
+  registered can be deleted — and it keeps a ``DELETED`` tombstone instead of
+  dropping the row, so a delete that failed remotely can still be finished
+  later (design §5.2).
 """
 
 from __future__ import annotations
@@ -33,13 +35,9 @@ from openrag_lab.domain.rag.documents import (
     SUPPORTED_DOCUMENT_EXTENSIONS,
     is_supported_document,
 )
-from openrag_lab.domain.rag.ports import RagGateway
+from openrag_lab.domain.rag.ports import RagGateway, RagOutcomeUnknownError
 from openrag_lab.domain.shared.enums import DocumentStatus
-from openrag_lab.domain.shared.errors import (
-    ConflictError,
-    InvalidOperationError,
-    NotFoundError,
-)
+from openrag_lab.domain.shared.errors import InvalidOperationError, NotFoundError
 from openrag_lab.domain.shared.ids import DocumentId, UserId
 from openrag_lab.infrastructure.db.repositories.identity import SqlDocumentRepository
 from openrag_lab.infrastructure.openrag.tenant_scope import resolve_tenant_scope
@@ -213,8 +211,20 @@ class DocumentService:
 
         If even this write fails the row stays ``INDEXING`` — also a
         non-terminal state, so the crash path is still discoverable (design §5.1).
+
+        A timeout is recorded as an *unknown* outcome, not as a clean failure:
+        OpenRAG may have written the document before it stopped answering, and
+        the difference decides whether reconciliation has to probe at all.
         """
-        document.mark_failed(f"{type(exc).__name__}: {exc}")
+        prefix = (
+            "no verdict from OpenRAG"
+            if isinstance(exc, RagOutcomeUnknownError)
+            else type(exc).__name__
+        )
+        document.mark_failed(
+            f"{prefix}: {type(exc).__name__}: {exc}",
+            outcome_unknown=isinstance(exc, RagOutcomeUnknownError),
+        )
         try:
             await self._commit_registry(
                 action="fail",
@@ -237,7 +247,7 @@ class DocumentService:
         filename: str,
         tenant_id: str | None = None,
     ) -> dict[str, Any]:
-        """Remove a registered document from OpenRAG and the registry.
+        """Remove a registered document from OpenRAG, keeping a tombstone.
 
         Scope comes from :meth:`RetrievalScopeResolver.resolve_tenant`, exactly
         as for search: a caller reaches its own tenant, and a global
@@ -245,6 +255,12 @@ class DocumentService:
         (that is the same authority it uses to create users elsewhere — see the
         authorization model documented in retrieval_scope). Everyone else is
         rejected with 403 by the resolver.
+
+        The registry row is a hand-rolled finalizer (design §5.2): it moves to
+        ``DELETING`` — committed *before* OpenRAG is called — and ends as a
+        ``DELETED`` tombstone instead of disappearing. Dropping the row would
+        destroy the only record that this name was ever registered here, which
+        is precisely what makes a remote leftover unreachable through the API.
         """
         tenant, _ = await self._resolver.resolve_tenant(
             actor_user_id=actor_user_id,
@@ -265,31 +281,140 @@ class DocumentService:
             # Deleting by name cannot reach anything the tenant did not
             # register, so an unknown name is simply not found.
             raise NotFoundError(f"Document not found: {display_name}")
-        if document.status is DocumentStatus.INDEXING:
-            # An upload of this name is in flight; letting the delete through
-            # would race with its promotion (and the promotion would re-insert
-            # the row we just removed). The proper fix is the DELETING state,
-            # which is stage P2 of the registry-state design.
-            raise ConflictError(f"Document is still being indexed: {display_name}")
+        if document.status is DocumentStatus.DELETED:
+            # The tombstone is bookkeeping, not a document: from the caller's
+            # side the name is gone, and re-deleting cannot reach anything.
+            # Retrying an *unconfirmed* delete is reconciliation's job (P3) —
+            # keeping the retry out of the request path is what stops a dead
+            # request from being the only thing that ever repairs the row.
+            raise NotFoundError(f"Document not found: {display_name}")
+        # INDEXING (an upload is in flight) and DELETING (another delete is
+        # already driving the remote) both mean "this name is busy": 409.
+        document.mark_deleting()
 
-        result = await to_thread.run_sync(
-            lambda: self._gateway.delete_document(
-                api_key=resolve_tenant_scope(tenant).api_key,
-                stored_filename=stored_filename,
-            ),
-            limiter=_INGEST_LIMITER,
-        )
+        # Intent first, exactly as for uploads: if the process dies after this
+        # commit, the row says DELETING and reconciliation can finish the job.
         await self._commit_registry(
-            action="remove",
+            action="delete-intent",
             tenant_label=tenant.slug,
             stored_filename=stored_filename,
-            save=lambda: self._documents.delete(document.id),
+            save=lambda: self._documents.save(document),
+        )
+
+        try:
+            result = await to_thread.run_sync(
+                lambda: self._gateway.delete_document(
+                    api_key=resolve_tenant_scope(tenant).api_key,
+                    stored_filename=stored_filename,
+                ),
+                limiter=_INGEST_LIMITER,
+            )
+        except RagOutcomeUnknownError as exc:
+            # OpenRAG never gave a verdict. The tenant-visible effect already
+            # holds (the name left the retrieval boundary when the row left
+            # INDEXED), so this counts as a delete — but it is recorded as
+            # unconfirmed so reconciliation can verify instead of trusting it.
+            await self._mark_deleted(
+                document,
+                tenant,
+                stored_filename,
+                confirmed=False,
+                detail=f"no verdict from OpenRAG: {type(exc).__name__}: {exc}",
+            )
+            return {
+                "filename": display_name,
+                "stored_filename": stored_filename,
+                "deleted_chunks": 0,
+                "confirmed": False,
+            }
+        except Exception as exc:
+            # A real refusal (OpenRAG answered and said no): nothing was removed.
+            # The row stays DELETING — a non-terminal state, so the delete is
+            # discoverable and retryable — and it records *why* it is stuck, the
+            # same way a failed upload does. Then the error keeps going: the
+            # caller still gets its 502, and the state does not move (recording a
+            # failure is not progress, and pretending otherwise would hide the
+            # retry that reconciliation owes).
+            await self._note_delete_failure(document, tenant, stored_filename, exc)
+            raise
+
+        chunks = int(result.get("deleted_chunks") or 0)
+        detail = (
+            "OpenRAG had no chunks for this name"
+            if result.get("already_absent")
+            else f"removed {chunks} chunk(s)"
+        )
+        await self._mark_deleted(
+            document,
+            tenant,
+            stored_filename,
+            confirmed=True,
+            detail=detail,
         )
         return {
             "filename": display_name,
             "stored_filename": stored_filename,
-            "deleted_chunks": int(result.get("deleted_chunks") or 0),
+            "deleted_chunks": chunks,
+            "confirmed": True,
         }
+
+    async def _note_delete_failure(
+        self,
+        document: Document,
+        tenant: Tenant,
+        stored_filename: str,
+        exc: BaseException,
+    ) -> None:
+        """Record a refused delete on the row, without masking the refusal.
+
+        If even this write fails, the row stays ``DELETING`` with no reason —
+        still a non-terminal, discoverable state, so the retry is not lost.
+        """
+        document.note_delete_failure(f"{type(exc).__name__}: {exc}")
+        try:
+            await self._commit_registry(
+                action="delete-refused",
+                tenant_label=tenant.slug,
+                stored_filename=stored_filename,
+                save=lambda: self._documents.save(document),
+            )
+        except Exception:  # noqa: BLE001 - the original refusal must win
+            logger.exception(
+                "Could not record the delete refusal for %s; the row stays "
+                "DELETING and reconciliation can still retry it",
+                stored_filename,
+            )
+
+    async def _mark_deleted(
+        self,
+        document: Document,
+        tenant: Tenant,
+        stored_filename: str,
+        *,
+        confirmed: bool,
+        detail: str,
+    ) -> None:
+        """Close the delete out on the row, without masking a failure to record it.
+
+        If this write fails the row stays ``DELETING`` — also non-terminal, so
+        the crash path is still discoverable. The caller must not turn that into
+        a "delete failed" answer: OpenRAG's side is settled either way, and
+        reporting a failure here would invite a retry that cannot help.
+        """
+        document.mark_deleted(confirmed=confirmed, detail=detail)
+        try:
+            await self._commit_registry(
+                action="delete-done",
+                tenant_label=tenant.slug,
+                stored_filename=stored_filename,
+                save=lambda: self._documents.save(document),
+            )
+        except Exception:  # noqa: BLE001 - the delete outcome must win
+            logger.exception(
+                "Could not record the delete outcome for %s; the row stays "
+                "DELETING and reconciliation can still finish it",
+                stored_filename,
+            )
 
     async def _commit_registry(
         self,

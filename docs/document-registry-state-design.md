@@ -102,12 +102,19 @@ D 这条是我在做阶段 0 的并发测试时撞出来的，说明**幂等约�
 ### 5.2 删除（`DocumentService.delete_document`）
 
 ```text
-1. find_by_stored_filename → 不存在 → 404（不变）
+1. find_by_stored_filename → 不存在或已是墓碑 → 404
 2. UPDATE status=DELETING + commit
-3. 调 OpenRAG delete（容忍 404 = 已经没了）
-4. DELETE 行 + commit
-   若 3 失败 → 留在 DELETING（对账重试）；若 4 失败 → 仍是 DELETING（重试删除）
+3. 调 OpenRAG delete, 结局三分:
+     有定论(删掉了 / 远端本来就没有)     → 4
+     没有定论(超时/连接断)               → 4, 但记 remote_outcome_unknown
+     明确拒绝(5xx 等)                    → 留在 DELETING, 502(对账重试)
+4. UPDATE status=DELETED + status_reason + commit   ← 墓碑, **不删行**
+   若 4 失败 → 仍是 DELETING（重试删除）
 ```
+
+与草案的差异：第 4 步**不删行**（原写 "DELETE 行"）。删行会释放
+`(tenant_id, stored_filename)` 这个键，也会销毁"这个文件名曾经登记过"的唯一记录 ——
+而那条记录正是删除失败后唯一能让对账找到远端残留的东西（§2 情形 A 的教训）。
 
 ### 5.3 替换上传（已 `INDEXED` 的行再上传同一文件名）
 
@@ -162,7 +169,7 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
 
 | 选项 | 做法 | 代价 |
 |---|---|---|
-| **M1 手写一次性迁移命令**（建议） | `openrag-lab db migrate-document-status`：`PRAGMA table_info(documents)` 检查列是否存在 → `ALTER TABLE documents ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'indexed'` | 需要自己维护"幂等 + 可重入"；每加一列都要写一次 |
+| **M1 手写一次性迁移命令**（已采用） | `openrag-lab migrate-registry`：检查列是否存在 → `ALTER TABLE documents ADD COLUMN ...` | 需要自己维护"幂等 + 可重入"；**已按列判断, 一条命令覆盖各期**, 不必每期新增命令 |
 | M2 现在引入 Alembic | 正规化 schema 版本管理 | 一次性成本高（配置、基线 revision、CI），但长期收益明确 |
 | M3 先不管存量库 | 只保证新库正确 | ❌ 不可接受：本地库有 58 行真实数据，升级后会 500 |
 
@@ -197,16 +204,61 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
   同一个 409 也用于删除在途文档。
 - **删除在途文档直接 409**（P1 的临时守卫）：不让删除与在途上传的晋升互相踩。P2 的
   `DELETING` 才是正解，届时这条守卫可以被替换掉。
-- **`create_all()` 之外仍需一次性迁移**：已实现为 `openrag-lab migrate-registry-status`
+- **`create_all()` 之外仍需一次性迁移**：已实现为 `openrag-lab migrate-registry`
   （幂等、按列判断、存量回填 `indexed`），并在本地 58 行真实数据上验证过。
+  （P1 时叫 `migrate-registry-status`，P2 起推广为覆盖各期；旧名字保留为别名。）
+
+### 10.1b P2 实现记录（逻辑删除 / 墓碑，与本文的差异）
+
+- **删除不再删行**：改留 `DELETED` 墓碑（理由见 §5.2 的差异说明）。用户列表**不显示**墓碑
+  （已经删掉的再列出来会读成"删除没生效"），但 `DELETING` 行仍显示 —— 那件事还在进行中。
+  同名重传**复活**同一行（同 `id`、保留 `created_at`），所以墓碑不占新键、也不占 5000 配额
+  （配额只数 `INDEXED`）。
+- **多了一个 `remote_outcome_unknown` 列**（布尔，默认 FALSE）：记录"这一行的终态是**没有拿到
+  远端定论**就定下的"（上传超时、删除超时）。它是 P3 的工作清单谓词
+  （`WHERE remote_outcome_unknown`）。**不写进 `status_reason` 的散文里**：用解析措辞来驱动
+  恢复，措辞一改就静默失效 —— `reingest.py` 早就为同一个理由改成按字段判定。
+  本列与 `status` 一起由 `openrag-lab migrate-registry` 补齐（P1 那条命令的推广：一条命令
+  覆盖各期，逐列判断，不再一期一个命令）。
+- **端口契约要表达"没有定论"**：新增 `RagOutcomeUnknownError`（在 `domain/rag/ports.py`，
+  属于端口契约而非域规则）。适配器负责区分三种结局：远端回 404 且形状为
+  `success=false, deleted_chunks=0` → 归一化成"已无此物"的正常返回；传输层失败
+  （`OpenRAGError.status_code is None`）→ 无定论；其余 → 原样抛出。**应用层不再解读
+  OpenRAG 的状态码约定**，也不再用字符串匹配错误文案。
+- **删除响应的契约变更**：多一个 `confirmed` 字段。超时仍返回 200（名字已离开检索边界），
+  但 `confirmed=false` + `deleted_chunks=0` —— 报一句光秃秃的"已删除"会让猜测冒充事实。
+- **P1 的临时守卫被正式语义取代**：`INDEXING` 时删除仍 409（这条守卫留着，见 §10.2），
+  但 `DELETING` 时删除、以及 `DELETING` 时上传，也都由状态机自己拒掉 —— 三种 409
+  在契约里各有明确含义（`docs/api-contract.md` §2.6/§2.7）。
+- **删除作废 `openrag_document_id`**（`mark_deleting`）：id 声称"远端存在这份文档"，
+  删除那一刻就不成立（评审第 1 轮的 issue ②）。必须在**删除时**清而不是重传时清 ——
+  重传的回查是 best effort，查不到时 `mark_indexed` 不会覆盖，旧 id 就会长期留在行里，
+  而它在 API 响应里可见。替换上传（非删除）仍然保留旧 id，理由是旧的仍然有效。
+- **上传侧同样留"无定论"的痕**：入库超时会把 `FAILED` 行标为
+  `remote_outcome_unknown=true`。这不是悲观，而是区分"确认没写"与"不知道写没写" ——
+  只有这个区别能告诉对账要不要探活（这也是 P1 评审提的那条意见的正确修法：
+  **不去猜存在性，而是把"不知道"如实记下来**）。
 
 ### 10.2 已知限制（P1 不做、P2/P4 再处理）
 
-- 对账任务（P3）尚未实现：`INDEXING`/`FAILED` 行目前**可查询但不会自动收敛**。
+- 对账任务（P3）尚未实现：`INDEXING`/`FAILED`/`DELETING` 行、以及
+  `remote_outcome_unknown=true` 的行，目前**可查询但不会自动收敛**。
+  P2 只负责把它们如实记下来（"只留痕"）。
 - 并发保护（决策 4）未做：请求与对账若同时改同一行，可能互相覆盖（单进程部署下风险低）。
-- 删除与晋升的竞态：P1 用"删除在途文档 → 409"挡住常见路径；但如果删除发生在
-  "晋升已提交、远端删除已完成"之后，仍可能出现一行指向已删远端内容的记录（方向安全：
-  检索不到，且列表可见 → 由 P3 对账清理）。
+- 删除与晋升的竞态：`INDEXING` 时删除仍 409，`DELETING` 时上传也 409，两条守卫合起来
+  使"上传覆盖掉一次在途删除"没有可达的交错（领域方法各自拒掉非法边）。剩下的是
+  "删除一个其实还在写远端的上传"这种跨进程时序，方向安全（检索不到，且列表可见），
+  由 P3 收敛。
+- 墓碑只增不减：没有保留期/清理策略（数量等于历史删除数）。等 P3 上线后按需加保留窗口。
+- **被拒绝的删除无法通过 API 重试**：行停在 `DELETING` 后，再调删除接口是 409（"名字忙"）。
+  这是刻意的（重试归 P3，见决策 11），但给 P3 留了一个必须解决的问题：
+  **它的重试入口要能作用于 `DELETING` 行**（服务层的 `mark_deleting()` 会拒绝
+  `DELETING`），否则对账拿不到能重试的路径。`status_reason` 已经在拒绝时写好，
+  P3 可以直接用它区分"拒绝过"与"可能仍在途"。
+- 阈值（P3 用）：`INDEXING` 的建议 stale 阈值是 `2 × UPLOAD_INGEST_TIMEOUT_SECONDS`
+  （默认 600s；系数 2 覆盖"限流排队 + 一次完整入库等待"），`DELETING` 是
+  `2 × client.timeout`（默认 120s）。**现在不写成配置项** —— 没有任何代码读它的配置
+  等于另一种"配了但没生效"，等 P3 落地时再随代码一起加。
 
 ## 10.3 原决策表（含建议，供追溯）
 
@@ -220,14 +272,18 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
 | 6 | 替换上传期间是否退出检索边界 | (a) 是（短暂搜不到） (b) 否（保持 `INDEXED`，贯穿替换） | **(a)**：宁可短暂搜不到，也不要搜到半新半旧 |
 | 7 | 是否需要 `DELETING` 状态 | (a) 需要（对账能区分"删除卡住"） (b) 不需要（删除失败就靠重试 + 404 容忍） | **(a)**：状态数量少，但语义收益明确 |
 | 8 | schema 迁移 | (a) 一次性迁移命令 (b) 现在引入 Alembic | **(a) 本期**，(b) 记为独立任务（它值得单独一个 PR） |
+| 9 | 删除是逻辑删还是物理删 | (a) 逻辑删（墓碑） (b) 物理删行 | **(a)**（P2，2026-09-19）：删行会释放键、销毁"曾经登记过"的记录 —— 那正是远端残留无法被对账发现的根因 |
+| 10 | 删除拿不到远端定论时怎么办 | (a) 算删除成功但记未确认 (b) 报失败留在 DELETING | **(a)**：名字已离开检索边界, 再报失败只会诱发无用的重试；但必须记下"未确认"，否则猜测冒充事实 |
+| 11 | 删一个已是墓碑的名字 | (a) 404 (b) 顺手重试远端删除再返回成功 | **(a)**：重试是对账的职责, 挂回请求路径等于让死掉的请求成为唯一修复机会 |
 
 ## 11. 分期（每期独立可合并）
 
 | 期 | 内容 | 依赖 | 规模 |
 |---|---|---|---|
 | **P1** | 状态列 + 三个状态（`INDEXING`/`INDEXED`/`FAILED`）+ 写路径改造 + **读路径只取 `INDEXED`** + 迁移命令 | 决策 1/6/8 | ~250 行 + 测试 |
-| **P2** | `DELETING` 状态 + 删除路径改造 | P1、决策 7 | ~80 行 |
-| **P3** | 对账 CLI（report / --fix）+ 幽灵文档报告 | P1、决策 3/5 | ~200 行 + 测试 |
+| **P2** ✅ | `DELETING` 状态 + 删除路径改造 + **`DELETED` 墓碑**（决策 10/11） | P1、决策 7 | ~80 行（实际 ~300 行含测试与契约） |
+| **P3** | 对账 CLI（report / --fix）+ 幽灵文档报告。**只留痕, 不写逻辑**（用户决策 2026-09-19）：先把
+`INDEXING`/`FAILED`/`DELETING` + `remote_outcome_unknown` 的清单查询做出来 | P1、P2、决策 3/5 | ~200 行 + 测试 |
 | **P4** | 并发保护 / 自动登记幽灵 / Alembic | 决策 4/5/8 | 独立评估 |
 
 **P1 单独就有价值**：它消灭"幽灵文档不可见"（情形 A），且 `INDEXING` 行天然是待处理清单。

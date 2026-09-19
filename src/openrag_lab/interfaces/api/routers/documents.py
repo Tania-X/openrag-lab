@@ -18,6 +18,7 @@ from openrag_lab.application.rag.document_service import DocumentService
 from openrag_lab.client import OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.identity.models import Document
+from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
 from openrag_lab.interfaces.api.deps import (
     CurrentUser,
     DbSession,
@@ -78,8 +79,10 @@ async def ingest_document(
 ) -> DocumentOut:
     """Store an uploaded file in OpenRAG under the tenant's namespace.
 
-    The document is registered only after OpenRAG reports the ingestion task
-    finished, so a failed ingest leaves no registry entry behind.
+    The registry row is written *before* OpenRAG is called (``status=indexing``)
+    and promoted to ``indexed`` only once the ingestion task reports success, so
+    a failed ingest leaves a discoverable ``failed`` row rather than nothing at
+    all. Only ``indexed`` documents take part in retrieval.
     """
     settings = get_settings()
     suffix = Path(file.filename or "upload").suffix
@@ -125,7 +128,7 @@ async def ingest_document(
                 size_bytes=size,
                 tenant_id=tenant_id,
             )
-        except OpenRAGError as exc:
+        except (OpenRAGError, RagOutcomeUnknownError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
     finally:
         temp_path.unlink(missing_ok=True)
@@ -152,6 +155,6 @@ async def delete_document(
             filename=filename,
             tenant_id=tenant_id,
         )
-    except OpenRAGError as exc:
+    except (OpenRAGError, RagOutcomeUnknownError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return DeleteDocumentOut(**result)

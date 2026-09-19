@@ -190,6 +190,13 @@ class DocumentModel(Base):
     status_reason: Mapped[str | None] = mapped_column(
         String(MAX_STATUS_REASON_LENGTH), nullable=True
     )
+    # Reconciliation worklist predicate (P2): the local state was concluded
+    # without a verdict from OpenRAG, so the row cannot be trusted as it stands.
+    # DEFAULT FALSE is the honest backfill for rows written before the column
+    # existed — every one of those was concluded with an answer.
+    remote_outcome_unknown: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

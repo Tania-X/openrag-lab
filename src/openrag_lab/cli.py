@@ -70,22 +70,34 @@ def ingest(
 
 
 @app.command()
-def migrate_registry_status() -> None:
-    """Add the document registry status columns to an existing database.
+def migrate_registry() -> None:
+    """Add any missing document registry columns to an existing database.
 
     Idempotent, and a no-op on a database created by the current code. Run once
-    after upgrading a database that predates the registry state machine
-    (docs/document-registry-state-design.md §8).
+    after upgrading a database that predates a registry phase
+    (docs/document-registry-state-design.md §8). One command covers every phase:
+    it checks each column on its own, so running it twice, or running it after
+    only some columns were added by hand, both work.
     """
-    asyncio.run(_migrate_registry_status())
+    asyncio.run(_migrate_registry())
 
 
-async def _migrate_registry_status() -> None:
-    from openrag_lab.infrastructure.db.migrations import add_document_status_columns
+@app.command()
+def migrate_registry_status() -> None:
+    """Deprecated alias for ``migrate-registry`` (P1 name, kept so muscle memory works)."""
+    console.print(
+        "[yellow]Note:[/yellow] `migrate-registry-status` is now `migrate-registry` "
+        "(it adds every registry column, not just the status ones)."
+    )
+    asyncio.run(_migrate_registry())
+
+
+async def _migrate_registry() -> None:
+    from openrag_lab.infrastructure.db.migrations import add_missing_registry_columns
     from openrag_lab.infrastructure.db.session import init_db
 
     engine = init_db(get_settings().database_url)
-    added = await add_document_status_columns(engine)
+    added = await add_missing_registry_columns(engine)
     if added:
         console.print(f"[green]Added columns:[/green] {', '.join(added)}")
     else:
