@@ -159,12 +159,16 @@ async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
                 # of health: exiting 0 here would hand cron a false green light.
                 console.print(f"[red]{exc}[/red]")
                 raise typer.Exit(code=1) from exc
+            # Assignment and every use of `report` live in the same block on
+            # purpose. Printing it after the `finally` made correctness depend on
+            # the `except` above always exiting — an implicit precondition that
+            # would have surfaced as a NameError the day someone softened that
+            # branch into a warning.
+            console.print(render_report(report))
+            if strict and report.needs_attention:
+                raise typer.Exit(code=1)
     finally:
         gateway.close()
-
-    console.print(render_report(report))
-    if strict and report.needs_attention:
-        raise typer.Exit(code=1)
 
 
 @app.command()
