@@ -227,3 +227,28 @@ def test_promotion_clears_a_stale_unknown_flag() -> None:
     document = _document(status=DocumentStatus.INDEXING, remote_outcome_unknown=True)
     document.mark_indexed("id")
     assert document.remote_outcome_unknown is False
+
+
+def test_deleting_voids_the_remote_document_id() -> None:
+    """删除意图那一刻, id 就该作废 —— 它声称的是"远端存在这份文档"。
+
+    留着它, 墓碑(以及复活后的行)就会一直挂着一个远端已经不存在的 id, 而它在
+    API 响应里是可见的。复活重传若这次查不到新 id, 旧 id 也不会被覆盖
+    (mark_indexed 只在真的收到 id 时才覆盖), 于是假事实会长期留在库里。
+    """
+    document = _document(status=DocumentStatus.INDEXED, openrag_document_id="orag-old")
+    document.mark_deleting()
+    assert document.openrag_document_id is None
+
+
+def test_a_replacement_upload_still_keeps_the_id() -> None:
+    """反向守卫: 替换上传不能清 id(那是静默降级, 见 mark_indexed 的注释)。
+
+    只有删除会作废 id; 替换时旧 id 仍然有效, 而新任务不一定回传 id。
+    """
+    document = _document(status=DocumentStatus.INDEXED, openrag_document_id="orag-old")
+    document.mark_indexing()
+    assert document.openrag_document_id == "orag-old"
+
+    document.mark_indexed(None)  # 任务没回传 id
+    assert document.openrag_document_id == "orag-old"

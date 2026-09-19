@@ -230,6 +230,10 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
 - **P1 的临时守卫被正式语义取代**：`INDEXING` 时删除仍 409（这条守卫留着，见 §10.2），
   但 `DELETING` 时删除、以及 `DELETING` 时上传，也都由状态机自己拒掉 —— 三种 409
   在契约里各有明确含义（`docs/api-contract.md` §2.6/§2.7）。
+- **删除作废 `openrag_document_id`**（`mark_deleting`）：id 声称"远端存在这份文档"，
+  删除那一刻就不成立（评审第 1 轮的 issue ②）。必须在**删除时**清而不是重传时清 ——
+  重传的回查是 best effort，查不到时 `mark_indexed` 不会覆盖，旧 id 就会长期留在行里，
+  而它在 API 响应里可见。替换上传（非删除）仍然保留旧 id，理由是旧的仍然有效。
 - **上传侧同样留"无定论"的痕**：入库超时会把 `FAILED` 行标为
   `remote_outcome_unknown=true`。这不是悲观，而是区分"确认没写"与"不知道写没写" ——
   只有这个区别能告诉对账要不要探活（这也是 P1 评审提的那条意见的正确修法：

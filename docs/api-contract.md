@@ -192,6 +192,12 @@ super_admin    传一个不存在的 tenant_id → 404
 服务端在入库成功后回查一次（best effort，查不到就是 `null`），
 同名重传换了内容会刷新成新 id。
 
+**删除会作废它**：id 声称的是"远端存在这份文档"，删除那一刻就不再成立，所以
+`deleting`/`deleted` 的行该字段为 `null`。重传一个已删除的名字时，如果这次回查没查到
+新 id，它保持 `null`（不会把删除前的旧 id 带回来）。
+替换上传（非删除）则相反：回查没命中时**保留**旧 id —— 旧 id 仍然有效，
+而丢掉它是静默降级。
+
 `status` 是登记表的状态机（`docs/document-registry-state-design.md`）：
 
 ```text

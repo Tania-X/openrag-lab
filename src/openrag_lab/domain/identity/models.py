@@ -365,6 +365,12 @@ class Document:
         self.status = DocumentStatus.DELETING
         self.status_reason = None
         self.remote_outcome_unknown = False
+        # The id is a claim that a document exists remotely, and deletion voids
+        # it. This is the moment to drop it, not the re-upload: right here there
+        # is provably nothing left for it to point at, whereas a *replacement*
+        # upload must keep the id (the task need not echo a new one, and
+        # dropping a still-valid id is a silent downgrade — see mark_indexed).
+        self.openrag_document_id = None
         self.updated_at = datetime.now(UTC)
 
     def mark_deleted(self, *, confirmed: bool, detail: str) -> None:

@@ -502,6 +502,7 @@ async def test_delete_removes_from_openrag_and_keeps_a_tombstone() -> None:
     async with _build_client(
         actor=ACME_TENANT,
         documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-before-delete",  # 有 id 才能验"删除把它作废了"
         tenant_role="developer",
         registry=registry,
     ) as (client, gateway):
@@ -526,6 +527,7 @@ async def test_delete_removes_from_openrag_and_keeps_a_tombstone() -> None:
     assert row.status is DocumentStatus.DELETED
     assert row.status_reason == "removed 3 chunk(s)"
     assert row.remote_outcome_unknown is False
+    assert row.openrag_document_id is None, "远端已不存在, id 必须作废"
 
 
 async def test_delete_of_an_unregistered_document_is_not_found() -> None:
@@ -956,3 +958,48 @@ async def test_a_tombstone_never_widens_the_retrieval_scope() -> None:
 
     assert payload["scope"]["document_count"] == 1
     assert gateway.searches[-1]["filters"]["data_sources"] == ["acme/ready.md"]
+
+
+async def test_a_resurrected_row_does_not_keep_the_deleted_document_id() -> None:
+    """评审提的那个场景: 删除后重传, 而这次 id 回查没查到东西。
+
+    `mark_indexed` 只在**真的收到** id 时才覆盖(best effort 查不到就保持原值),
+    所以如果删除时不清 id, 复活后的行会一直挂着一个已经被删掉的远端 id ——
+    而它在 API 响应里是可见的。删除那一刻就该作废它。
+    """
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-before-delete",
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        assert (await client.delete("/api/documents/report.md")).status_code == 200
+
+        gateway.document_id = None  # 回查未命中(best effort 会漏)
+        revived = await client.post("/api/documents/ingest", files=_upload("report.md"))
+        async with registry["session_factory"]() as session:
+            row = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+
+    assert revived.status_code == 201
+    assert revived.json()["openrag_document_id"] is None
+    assert row is not None
+    assert row.status is DocumentStatus.INDEXED
+    assert row.openrag_document_id is None, "旧 id 不能活过删除"
+
+
+async def test_a_replacement_upload_keeps_the_id_when_the_task_echoes_none() -> None:
+    """反向守卫: 替换上传(非删除)时, 查不到新 id 必须保留旧 id —— 那是静默降级。"""
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        seeded_document_id="orag-still-valid",
+    ) as (client, gateway):
+        gateway.document_id = None
+        response = await client.post("/api/documents/ingest", files=_upload("report.md"))
+
+    assert response.status_code == 201
+    assert response.json()["openrag_document_id"] == "orag-still-valid"
