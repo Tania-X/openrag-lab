@@ -17,6 +17,7 @@ from openrag_lab.comparison import (
 )
 from openrag_lab.config import get_settings
 from openrag_lab.dify import DifyClient
+from openrag_lab.domain.shared.errors import NotFoundError
 from openrag_lab.eval import evaluate_row, load_eval_csv, summarize_results
 from openrag_lab.ingest import ingest_directory
 from openrag_lab.metadata import dify_metadata_to_openrag_filters
@@ -149,9 +150,15 @@ async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
     )
     try:
         async with asynccontextmanager(get_session)() as session:
-            report = await ReconcileService(session, gateway, rules=rules).run(
-                tenant_slugs=[tenant_slug] if tenant_slug else None
-            )
+            try:
+                report = await ReconcileService(session, gateway, rules=rules).run(
+                    tenant_slugs=[tenant_slug] if tenant_slug else None
+                )
+            except NotFoundError as exc:
+                # A slug that matches nothing is a caller error, not a clean bill
+                # of health: exiting 0 here would hand cron a false green light.
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1) from exc
     finally:
         gateway.close()
 

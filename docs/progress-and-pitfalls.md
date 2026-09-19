@@ -625,6 +625,26 @@ mark_deleting: INDEXING/DELETING/DELETED → 冲突   （删除撞在途上传 /
   请求超时不再来自配置 / 命名空间不再自带分隔符；
 - 真实库上跑过：58 行全是 `indexed` → 零待办；远端读不到时降级路径也验过（`--strict` 退出码 1）。
 
+### 评审第 3 轮抓到的 4 级 bug：`--tenant` 打错 = 静默假绿灯
+
+`run(tenant_slugs=[...])` 过滤后如果**一个都没匹配上**，循环体一次都不执行：findings、
+remote_errors、configuration_problem 全空 → `needs_attention` 为 False → CLI 打印
+"nothing needs attention"、`--strict` 退出码 0。**打错一个字母的信号与"系统健康"完全一致**，
+而这个命令正是给 cron/告警用的。
+
+修法不是"记进报告"，而是**拒绝**：过滤后匹配不到（或部分匹配不上）就是调用方错误，
+`NotFoundError` + 退出码 1。理由：根本没有"报告对象"时，任何报告都是编的。
+
+**更值得记的是：我自己的测试把这个 bug 固化成了期望值** ——
+`test_a_tenant_filter_limits_the_walk` 里那句 `assert unknown.findings == []`
+把"空报告"写成了正确行为。**测试记录的是当时的行为，不是当时以为的行为**；
+这条只有靠外部评审（或变异测试）才能发现。
+
+顺带补上本仓第一条 CLI 测试（`--tenant typo` → 退出码 1）。第一版只断言退出码，
+变异测试显示：把 `raise typer.Exit(1)` 删掉后代码会因 `report` 未绑定抛 NameError，
+CliRunner 同样返回 1 —— **测试照样绿**。现在额外断言"是有意的 `SystemExit` 且输出无 Traceback"。
+**只钉结果不钉原因的断言，会被崩溃冒充。**
+
 ### 一条值得记住的坑
 
 **"最长前缀优先"是多余的 —— 但那不是重点，重点是它掩盖了一条真不变量。**

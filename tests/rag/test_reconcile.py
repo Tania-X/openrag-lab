@@ -36,6 +36,7 @@ from openrag_lab.application.rag.reconcile import (
 from openrag_lab.config import get_settings
 from openrag_lab.domain.identity.models import Document, Tenant, User
 from openrag_lab.domain.shared.enums import DocumentStatus
+from openrag_lab.domain.shared.errors import NotFoundError
 from openrag_lab.domain.shared.ids import DocumentId, TenantId, UserId
 from openrag_lab.infrastructure.db import models  # noqa: F401
 from openrag_lab.infrastructure.db.base import Base
@@ -457,13 +458,65 @@ async def test_a_tenant_filter_limits_the_walk(registry) -> None:
 
     gateway = FakeGateway()
     async with registry() as session:
-        service = ReconcileService(session, gateway, rules=RULES)
-        unknown = await service.run(tenant_slugs=["nope"])
-        known = await service.run(tenant_slugs=["acme"])
+        report = await ReconcileService(session, gateway, rules=RULES).run(
+            tenant_slugs=["acme"]
+        )
 
-    assert unknown.findings == []
-    assert gateway.listed == ["orag_test_key"], "过滤掉的租户不该被访问"
-    assert [f.stored_filename for f in known.findings] == ["acme/bad.md"]
+    assert [f.stored_filename for f in report.findings] == ["acme/bad.md"]
+    assert gateway.listed == ["orag_test_key"]
+
+
+async def test_an_unknown_tenant_slug_is_refused_not_reported_as_healthy(
+    registry,
+) -> None:
+    """评审第 3 轮(4 级): slug 打错不能和"一切正常"共用同一个信号。
+
+    空报告与健康报告长得一模一样 —— "nothing needs attention" + 退出码 0 ——
+    而这个命令正是给 cron 用的。所以过滤后匹配不到就是调用方错误, 直接拒绝。
+    """
+    gateway = FakeGateway()
+    async with registry() as session:
+        with pytest.raises(NotFoundError) as caught:
+            await ReconcileService(session, gateway, rules=RULES).run(
+                tenant_slugs=["typo"]
+            )
+
+    assert "typo" in str(caught.value)
+    assert gateway.listed == [], "连远端都不该访问"
+
+
+async def test_a_partially_matching_filter_is_refused_too(registry) -> None:
+    """一个对、一个错也不行: 静默忽略打错的那个, 等于悄悄改变了报告的范围。"""
+    gateway = FakeGateway()
+    async with registry() as session:
+        with pytest.raises(NotFoundError) as caught:
+            await ReconcileService(session, gateway, rules=RULES).run(
+                tenant_slugs=["acme", "typo"]
+            )
+    assert "typo" in str(caught.value)
+
+
+async def test_an_empty_filter_is_refused(registry) -> None:
+    """没有任何租户可报时, 拒绝比"空报告"诚实。"""
+    gateway = FakeGateway()
+    async with registry() as session:
+        with pytest.raises(NotFoundError):
+            await ReconcileService(session, gateway, rules=RULES).run(tenant_slugs=[])
+
+
+async def test_no_filter_still_reports_every_tenant(registry) -> None:
+    """反向守卫: 不传过滤是正常用法, 不能被上面的拒绝逻辑误伤。"""
+    async with registry() as session:
+        await SqlDocumentRepository(session).save(
+            _document("bad.md", DocumentStatus.FAILED, reason="boom")
+        )
+        await session.commit()
+
+    gateway = FakeGateway()
+    async with registry() as session:
+        report = await ReconcileService(session, gateway, rules=RULES).run()
+
+    assert [f.stored_filename for f in report.findings] == ["acme/bad.md"]
 
 
 async def test_repository_query_selects_exactly_the_unsettled_rows(registry) -> None:
@@ -623,3 +676,40 @@ def test_every_status_and_flag_combination_has_a_defined_verdict() -> None:
     for status, want in aged.items():
         rows = [_document("x.md", status, age_seconds=100000)]
         assert [f.category for f in _classify(rows)] == [want]
+
+
+# ── CLI 层的信号: 退出码就是用户可见的结论(评审第 3 轮) ────────────────────
+
+
+def test_the_cli_exits_non_zero_for_an_unknown_tenant() -> None:
+    """这个 bug 的用户可见形态就在退出码上 —— 所以在这里再钉一次。
+
+    真实调用(临时库、真 CLI 入口、不碰网络): `--tenant typo` 必须非零退出,
+    且**不能**出现"nothing needs attention"。前者是 cron 唯一能看到的信号, 后者是
+    它最不能看到的一句话。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from typer.testing import CliRunner
+
+    from openrag_lab.cli import app
+
+    with tempfile.TemporaryDirectory() as tmp:
+        database = Path(tmp) / "cli.db"
+        previous = get_settings().database_url
+        object.__setattr__(get_settings(), "database_url", f"sqlite+aiosqlite:///{database}")
+        try:
+            result = CliRunner().invoke(app, ["reconcile", "--tenant", "typo"])
+        finally:
+            object.__setattr__(get_settings(), "database_url", previous)
+
+    assert result.exit_code == 1, result.output
+    assert "typo" in result.output
+    assert "nothing needs attention" not in result.output
+    # 退出码还不够: 一个未捕获的 NameError 也会让 CliRunner 返回 1。必须钉住
+    # "是**有意的** typer.Exit", 否则这条测试会在代码崩掉时照样变绿。
+    assert isinstance(result.exception, SystemExit), (
+        f"应是有意的 typer.Exit, 实际 {type(result.exception).__name__}: {result.exception}"
+    )
+    assert "Traceback" not in result.output

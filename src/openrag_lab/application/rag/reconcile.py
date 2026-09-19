@@ -32,6 +32,7 @@ from anyio import to_thread
 from openrag_lab.config import ConfigurationError
 from openrag_lab.domain.identity.models import Document
 from openrag_lab.domain.shared.enums import DocumentStatus
+from openrag_lab.domain.shared.errors import NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -383,6 +384,12 @@ class ReconcileService:
         ``tenant_slugs`` limits the walk (one tenant, or a few); the default is
         every tenant, because a stuck row is not something a caller should have
         to know to ask about.
+
+        A slug that matches nothing **raises** instead of producing an empty
+        report. An empty report and a healthy one look identical — "nothing needs
+        attention" with exit code 0 — so a typo would arrive as a green light,
+        and this report is meant to be run from cron. There is nothing to report
+        *about* when the filter matches nothing, so the request is refused.
         """
         from openrag_lab.infrastructure.db.repositories.identity import (
             SqlDocumentRepository,
@@ -394,6 +401,14 @@ class ReconcileService:
         if tenant_slugs is not None:
             wanted = set(tenant_slugs)
             tenants = [tenant for tenant in tenants if tenant.slug in wanted]
+            unknown = sorted(wanted - {tenant.slug for tenant in tenants})
+            if unknown or not tenants:
+                # Both cases mean "there is nothing here to report on", which must
+                # not share the signal of "everything is fine".
+                raise NotFoundError(
+                    "No tenant matched the filter: "
+                    f"{', '.join(unknown) if unknown else '(empty filter)'}"
+                )
         # document_namespace already ends with the separator ("acme/"); adding
         # another one here would match nothing and report every remote document
         # as living outside every namespace.
