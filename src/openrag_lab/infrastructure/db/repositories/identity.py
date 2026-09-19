@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openrag_lab.domain.identity.models import (
@@ -539,6 +539,48 @@ class SqlDocumentRepository:
             .order_by(DocumentModel.created_at)
         )
         return [_document_to_domain(m) for m in result.scalars().all()]
+
+    async def list_unsettled(self, tenant_id: TenantId) -> list[Document]:
+        """Rows that may need attention: transitional, failed, or unconfirmed.
+
+        ``INDEXING``/``DELETING`` are included regardless of age — deciding
+        whether one is *stuck* needs a threshold, and that call belongs to the
+        reconciliation rules, not to a query. ``remote_outcome_unknown`` is part
+        of the predicate because it is the one flag that makes a row untrustworthy
+        even when its status looks final (an unconfirmed tombstone).
+        """
+        result = await self._session.execute(
+            select(DocumentModel)
+            .where(
+                DocumentModel.tenant_id == tenant_id.value,
+                or_(
+                    DocumentModel.status.in_(
+                        (
+                            DocumentStatus.INDEXING,
+                            DocumentStatus.FAILED,
+                            DocumentStatus.DELETING,
+                        )
+                    ),
+                    DocumentModel.remote_outcome_unknown.is_(True),
+                ),
+            )
+            .order_by(DocumentModel.updated_at)
+        )
+        return [_document_to_domain(model) for model in result.scalars().all()]
+
+    async def list_all_stored_filenames(self, tenant_id: TenantId) -> list[str]:
+        """Every name the registry knows for this tenant, tombstones included.
+
+        This is the "do we know about it?" side of ghost detection: a row is a
+        record that the name was registered, whatever state it is in, so a remote
+        document with a failed row is not a ghost.
+        """
+        result = await self._session.execute(
+            select(DocumentModel.stored_filename)
+            .where(DocumentModel.tenant_id == tenant_id.value)
+            .order_by(DocumentModel.created_at)
+        )
+        return list(result.scalars().all())
 
     async def list_stored_filenames(self, tenant_id: TenantId) -> list[str]:
         """The tenant's retrieval boundary: **only** documents OpenRAG confirmed.

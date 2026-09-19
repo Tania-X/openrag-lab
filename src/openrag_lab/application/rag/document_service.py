@@ -146,10 +146,13 @@ class DocumentService:
                 status=DocumentStatus.INDEXING,
             )
         else:
-            # Same name, same tenant: replace (was INDEXED) or retry (was FAILED).
-            # Still INDEXING means another upload owns this name right now, and
-            # mark_indexing() turns that into a ConflictError (409) rather than
-            # letting two callers drive the remote state.
+            # Same name, same tenant. Three of the four live states land here:
+            # replace (was INDEXED), retry (was FAILED), and resurrect (was
+            # DELETED — the tombstone keeps the row, so the name is reused
+            # instead of re-registered: same id, same created_at).
+            # INDEXING and DELETING mean another operation owns this name right
+            # now, and mark_indexing() turns those into a ConflictError (409)
+            # rather than letting two callers drive the remote state.
             document = existing
             document.display_name = display_name
             document.mimetype = mimetype
@@ -328,13 +331,18 @@ class DocumentService:
                 "confirmed": False,
             }
         except Exception as exc:
-            # A real refusal (OpenRAG answered and said no): nothing was removed.
-            # The row stays DELETING — a non-terminal state, so the delete is
-            # discoverable and retryable — and it records *why* it is stuck, the
-            # same way a failed upload does. Then the error keeps going: the
-            # caller still gets its 502, and the state does not move (recording a
-            # failure is not progress, and pretending otherwise would hide the
-            # retry that reconciliation owes).
+            # This is where a *conclusion* gets recorded, so it is deliberately
+            # `Exception` and not `BaseException`: a cancellation (client
+            # disconnect, shutdown) does not kill this worker thread, so the
+            # delete may genuinely still be in flight. Such a row keeps an empty
+            # status_reason on purpose — "no conclusion yet" is the honest value,
+            # and reconciliation's discriminator reads exactly that (a reason
+            # means the last attempt was refused; no reason means unknown).
+            # OpenRAG answering and saying no is different: nothing was removed,
+            # so the row stays DELETING — non-terminal, discoverable, retryable —
+            # and records why. Then the error keeps going: the caller still gets
+            # its 502, and the state does not move (recording a failure is not
+            # progress, and pretending otherwise would hide the retry owed).
             await self._note_delete_failure(document, tenant, stored_filename, exc)
             raise
 

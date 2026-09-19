@@ -36,6 +36,7 @@ cp .env.example .env
 uv run openrag-lab init
 uv run openrag-lab list-files
 uv run openrag-lab ingest --directory data/sample-data
+uv run openrag-lab reconcile          # 只读: 登记表与 OpenRAG 哪里对不上
 uv run openrag-lab eval --csv configs/eval/评测集-questions.csv --top-k 5
 ```
 

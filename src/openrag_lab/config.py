@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     #: is a long transaction that holds a worker thread, so this bounds both the
     #: request and the thread it occupies (default 5 minutes).
     upload_ingest_timeout_seconds: float = Field(default=300.0, alias="UPLOAD_INGEST_TIMEOUT_SECONDS")
+    #: Per-request timeout for every other OpenRAG call (search, chat, delete,
+    #: listings). It was hardcoded in ``OpenRAGClient``; it is configuration now
+    #: because reconciliation derives its "stuck delete" threshold from it — a
+    #: threshold has to be derived from a number the operator can see and change.
+    openrag_request_timeout_seconds: float = Field(
+        default=60.0, alias="OPENRAG_REQUEST_TIMEOUT_SECONDS"
+    )
 
     eval_csv: Path = Field(default=PROJECT_ROOT / "configs/eval/fintech-eval.csv", alias="EVAL_CSV")
     dify_rag_lab_path: Path = Field(default=Path("../dify-rag-lab"), alias="DIFY_RAG_LAB_PATH")

@@ -105,6 +105,61 @@ async def _migrate_registry() -> None:
 
 
 @app.command()
+def reconcile(
+    tenant: str | None = typer.Option(  # noqa: B008
+        None, "--tenant", help="Only this tenant slug (default: every tenant)."
+    ),
+    strict: bool = typer.Option(  # noqa: B008
+        False,
+        "--strict",
+        help="Exit 1 when anything needs attention (for cron / alerting).",
+    ),
+) -> None:
+    """Report where the registry and OpenRAG disagree. Read-only.
+
+    Stage P3 of the registry-state design: it lists rows that may need attention
+    (stuck uploads, stuck deletes, failures, unconfirmed deletes) and documents
+    that exist on only one side. **It never repairs anything** — an automatic
+    repairer amplifies whatever authority it is given, so it ships in report
+    mode first and stays there until the report has been read for a while.
+    """
+    asyncio.run(_reconcile(tenant, strict))
+
+
+async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
+    from openrag_lab.application.rag.reconcile import (
+        ReconcileService,
+        StalenessRules,
+        render_report,
+    )
+    from openrag_lab.infrastructure.db.session import create_all, get_session
+    from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
+
+    settings = get_settings()
+    await create_all()
+    # Thresholds are derived from the budgets they guard, never hand-set: see
+    # StalenessRules for why each factor is what it is.
+    rules = StalenessRules.derive(
+        ingest_timeout_seconds=settings.upload_ingest_timeout_seconds,
+        request_timeout_seconds=settings.openrag_request_timeout_seconds,
+    )
+    gateway = OpenRAGGateway(
+        ingest_timeout=settings.upload_ingest_timeout_seconds
+    )
+    try:
+        async with asynccontextmanager(get_session)() as session:
+            report = await ReconcileService(session, gateway, rules=rules).run(
+                tenant_slugs=[tenant_slug] if tenant_slug else None
+            )
+    finally:
+        gateway.close()
+
+    console.print(render_report(report))
+    if strict and report.needs_attention:
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def list_files() -> None:
     """List currently ingested files in OpenRAG."""
     from openrag_lab.client import OpenRAGClient

@@ -139,9 +139,27 @@ D 这条是我在做阶段 0 的并发测试时撞出来的，说明**幂等约�
 
 ## 7. 对账任务（reconciliation）
 
+> **实现状态（P3，2026-09-19）：report 已落地（`openrag-lab reconcile`），`--fix` 未实现。**
+> 用户决策"对账逻辑先不写，只留痕"——本阶段只报告，一次写入都没有（有测试钉住）。
+> 下表最右列是**将来** `--fix` 的动作，现在只以"建议"文案出现在报告里。
+
 设计成一个**CLI 子命令**（沿用 `reingest_legacy` 的形态：`typer` 命令 + `asyncio.run`），
 而不是 lifespan 后台任务——理由：它需要显式可控（先 report 后 repair）、不能拖慢启动、
 且未来可以挂 cron。
+
+实际落地的形态与原设计有三处偏差：
+
+1. **阈值从超时推导**，不是 `--age-minutes` 手填：`INDEXING` = 2×`UPLOAD_INGEST_TIMEOUT_SECONDS`
+   （系数 2 覆盖"限流排队 + 一次完整入库等待"），`DELETING` = 2×`OPENRAG_REQUEST_TIMEOUT_SECONDS`。
+   报告顶部会打印它这次用的阈值，所以运维不必猜。
+   （顺带把原先硬编码在 `OpenRAGClient` 里的 60 秒请求超时变成配置项：**阈值必须来自
+   运维看得见、改得动的数字**。）
+2. **多了一类输入**：`remote_outcome_unknown` 的行（没有定论的上传/删除），以及
+   "登记表说 `INDEXED`、远端却没有"（情形 B）。后者与原设计只报幽灵不同，但同属
+   "两边对不上"，且方向安全所以只报不修。
+3. **远端读不到时降级**：按租户 try/except，失败的租户记进报告并**排除在比对之外**
+   （读不到 ≠ 没有；否则一次超时会把整个租户的健康文档报成 missing）。
+   本地那一半不需要网络，照常输出 —— 这个命令最需要能跑的时刻，恰恰是远端出问题的时候。
 
 ```text
 openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
@@ -241,9 +259,11 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
 
 ### 10.2 已知限制（P1 不做、P2/P4 再处理）
 
-- 对账任务（P3）尚未实现：`INDEXING`/`FAILED`/`DELETING` 行、以及
-  `remote_outcome_unknown=true` 的行，目前**可查询但不会自动收敛**。
-  P2 只负责把它们如实记下来（"只留痕"）。
+- **对账只报告、不修复**（P3）：`openrag-lab reconcile` 能列出 `INDEXING`/`FAILED`/
+  `DELETING`/`remote_outcome_unknown` 的行，以及幽灵/缺失/陌生命名空间的远端文档，
+  但**不收敛任何东西**；`--fix` 是后续阶段。
+- 报告的"建议动作"里有两项**当前没有入口**：探活（复核对账）与重试删除。
+  后者见下面那条（`DELETING` 行的重试入口），前者是 `--fix` 的核心。
 - 并发保护（决策 4）未做：请求与对账若同时改同一行，可能互相覆盖（单进程部署下风险低）。
 - 删除与晋升的竞态：`INDEXING` 时删除仍 409，`DELETING` 时上传也 409，两条守卫合起来
   使"上传覆盖掉一次在途删除"没有可达的交错（领域方法各自拒掉非法边）。剩下的是
@@ -255,10 +275,10 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
   **它的重试入口要能作用于 `DELETING` 行**（服务层的 `mark_deleting()` 会拒绝
   `DELETING`），否则对账拿不到能重试的路径。`status_reason` 已经在拒绝时写好，
   P3 可以直接用它区分"拒绝过"与"可能仍在途"。
-- 阈值（P3 用）：`INDEXING` 的建议 stale 阈值是 `2 × UPLOAD_INGEST_TIMEOUT_SECONDS`
-  （默认 600s；系数 2 覆盖"限流排队 + 一次完整入库等待"），`DELETING` 是
-  `2 × client.timeout`（默认 120s）。**现在不写成配置项** —— 没有任何代码读它的配置
-  等于另一种"配了但没生效"，等 P3 落地时再随代码一起加。
+- 阈值（P3 已实现，见 `application/rag/reconcile.py` 的 `StalenessRules`）：
+  `INDEXING` = `2 × UPLOAD_INGEST_TIMEOUT_SECONDS`（默认 600s；系数 2 覆盖
+  "限流排队 + 一次完整入库等待"），`DELETING` = `2 × OPENRAG_REQUEST_TIMEOUT_SECONDS`
+  （默认 120s）。两者都**从配置派生**，不写成独立常量：改了超时，阈值自动跟着走。
 
 ## 10.3 原决策表（含建议，供追溯）
 
@@ -282,8 +302,9 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
 |---|---|---|---|
 | **P1** | 状态列 + 三个状态（`INDEXING`/`INDEXED`/`FAILED`）+ 写路径改造 + **读路径只取 `INDEXED`** + 迁移命令 | 决策 1/6/8 | ~250 行 + 测试 |
 | **P2** ✅ | `DELETING` 状态 + 删除路径改造 + **`DELETED` 墓碑**（决策 10/11） | P1、决策 7 | ~80 行（实际 ~300 行含测试与契约） |
-| **P3** | 对账 CLI（report / --fix）+ 幽灵文档报告。**只留痕, 不写逻辑**（用户决策 2026-09-19）：先把
-`INDEXING`/`FAILED`/`DELETING` + `remote_outcome_unknown` 的清单查询做出来 | P1、P2、决策 3/5 | ~200 行 + 测试 |
+| **P3** ✅ | 对账 CLI **report 部分**：本地待办清单 + 幽灵/缺失/陌生命名空间 + 远端不可读降级。
+**只报告、零写入**（用户决策 2026-09-19）；`--fix` 与 `--age-minutes` 不在此期 | P1、P2、决策 3/5 | 实际 ~400 行含测试 |
+| **P3b** | `--fix`：探活后晋升/标记、重试删除（需要一个能作用于 `DELETING` 行的入口）、幽灵处置 | P3、决策 5 | 待评估 |
 | **P4** | 并发保护 / 自动登记幽灵 / Alembic | 决策 4/5/8 | 独立评估 |
 
 **P1 单独就有价值**：它消灭"幽灵文档不可见"（情形 A），且 `INDEXING` 行天然是待处理清单。

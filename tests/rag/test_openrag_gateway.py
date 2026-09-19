@@ -35,9 +35,16 @@ class FakeClient:
     #: the gateway builds its client lazily, inside the call under test.
     behavior: dict[str, Any] = {}
 
-    def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout: float | None = None,
+        ingest_timeout: float | None = None,
+    ) -> None:
         self.base_url = base_url
         self.api_key = api_key
+        self.timeout = timeout
         self.ingest_timeout = ingest_timeout
         self.closed = False
         self.calls: list[tuple[str, dict[str, Any]]] = []
@@ -59,6 +66,10 @@ class FakeClient:
     def chat(self, message: str, **kwargs: Any) -> dict[str, Any]:
         self.calls.append(("chat", {"message": message, **kwargs}))
         return {"response": "ok"}
+
+    def list_files(self) -> list[dict[str, Any]]:
+        self.calls.append(("list_files", {}))
+        return list(FakeClient.behavior.get("remote_files", []))
 
     def delete_document(self, filename: str) -> Any:
         self.calls.append(("delete_document", {"filename": filename}))
@@ -264,11 +275,17 @@ def test_concurrent_first_calls_share_one_live_client() -> None:
     built: list[str] = []
 
     class SlowClient(FakeClient):
-        def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+        def __init__(
+            self,
+            base_url: str,
+            api_key: str,
+            timeout: float | None = None,
+            ingest_timeout: float | None = None,
+        ) -> None:
             with build_lock:
                 built.append(api_key)
             time.sleep(0.05)  # 拉长构建窗口, 让竞争真的发生
-            super().__init__(base_url, api_key, ingest_timeout)
+            super().__init__(base_url, api_key, timeout=timeout, ingest_timeout=ingest_timeout)
 
     gateway = OpenRAGGateway(client_factory=SlowClient)
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -296,11 +313,17 @@ def test_building_one_tenant_does_not_block_another() -> None:
     release = threading.Event()
 
     class BlockingBuild(FakeClient):
-        def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
+        def __init__(
+            self,
+            base_url: str,
+            api_key: str,
+            timeout: float | None = None,
+            ingest_timeout: float | None = None,
+        ) -> None:
             if api_key == "tenant-slow":
                 started.set()
                 release.wait()  # 一直卡住, 直到本测试显式放行
-            super().__init__(base_url, api_key, ingest_timeout)
+            super().__init__(base_url, api_key, timeout=timeout, ingest_timeout=ingest_timeout)
 
     gateway = OpenRAGGateway(client_factory=BlockingBuild)
     slow = threading.Thread(target=lambda: _search(gateway, "tenant-slow"), daemon=True)
@@ -493,3 +516,38 @@ def test_a_successful_delete_without_a_body_still_settles() -> None:
         gateway.close()
 
     assert result == {"deleted_chunks": 0, "already_absent": False}
+
+
+def test_list_document_filenames_returns_what_openrag_stores() -> None:
+    """对账要一次拿到远端全量名单, 而不是逐个探活。"""
+    FakeClient.behavior = {
+        "remote_files": [
+            {"filename": "acme/a.md", "document_id": "1"},
+            {"filename": "acme/b.md", "document_id": "2"},
+            {"document_id": "3"},  # 没有文件名的条目要跳过, 不能变成 None 混进名单
+        ]
+    }
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        names = gateway.list_document_filenames(api_key="k")
+    finally:
+        gateway.close()
+
+    assert names == ["acme/a.md", "acme/b.md"]
+
+
+def test_the_per_request_timeout_comes_from_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """请求超时是可配的, 因为对账的"删除卡住"阈值由它推导 —— 阈值必须来自
+    运维看得见、改得动的数字, 而不是客户端里的一个字面量。"""
+    monkeypatch.setattr(
+        get_settings(), "openrag_request_timeout_seconds", 42.0, raising=False
+    )
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        gateway.chat(
+            api_key="k", message="q", filters={"data_sources": []}, limit=1, score_threshold=0.0
+        )
+    finally:
+        gateway.close()
+
+    assert FakeClient.instances[-1].timeout == 42.0

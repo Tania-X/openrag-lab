@@ -73,6 +73,8 @@ class FakeDocumentGateway:
         self.staged_path: Path | None = None
         self.lookups: list[dict[str, Any]] = []
         self.searches: list[dict[str, Any]] = []
+        self.listings: list[dict[str, Any]] = []
+        self.remote_files: list[str] = []
         self.document_id: str | None = "orag-doc-1"
 
     def ingest_document(self, **kwargs: Any) -> dict[str, Any]:
@@ -95,6 +97,10 @@ class FakeDocumentGateway:
     def find_document_id(self, **kwargs: Any) -> str | None:
         self.lookups.append(kwargs)
         return self.document_id
+
+    def list_document_filenames(self, **kwargs: Any) -> list[str]:
+        self.listings.append(kwargs)
+        return list(self.remote_files)
 
     def search(self, **kwargs: Any) -> dict[str, Any]:
         self.searches.append(kwargs)

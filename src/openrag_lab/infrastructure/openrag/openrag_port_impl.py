@@ -208,18 +208,23 @@ class OpenRAGGateway:
 
         The address is passed explicitly rather than left to the client's own
         defaulting, so the gateway always targets the configured OpenRAG
-        instance even if that defaulting changes. The ingestion timeout is set
-        here too: it decides how long a request thread can be held.
+        instance even if that defaulting changes. Both timeouts are set here too:
+        the ingest one decides how long a request thread can be held, and the
+        per-request one is what reconciliation derives its "stuck" threshold
+        from — a budget nothing can configure is a budget nobody can reason about.
         """
         settings = get_settings()
         base_url = self._base_url or settings.openrag_base_url
-        timeout = (
+        ingest_timeout = (
             self._ingest_timeout
             if self._ingest_timeout is not None
             else settings.upload_ingest_timeout_seconds
         )
         return self._client_factory(
-            base_url=base_url, api_key=api_key, ingest_timeout=timeout
+            base_url=base_url,
+            api_key=api_key,
+            timeout=settings.openrag_request_timeout_seconds,
+            ingest_timeout=ingest_timeout,
         )
 
     def close(self) -> None:
@@ -324,6 +329,14 @@ class OpenRAGGateway:
                 "deleted_chunks": int(payload.get("deleted_chunks") or 0),
                 "already_absent": False,
             }
+
+    def list_document_filenames(self, *, api_key: str) -> list[str]:
+        with self._borrow(api_key) as client:
+            return [
+                str(entry["filename"])
+                for entry in client.list_files()
+                if entry.get("filename")
+            ]
 
     def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
         with self._borrow(api_key) as client:
