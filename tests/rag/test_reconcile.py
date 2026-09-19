@@ -9,6 +9,7 @@ service wiring is tested with fakes, including a guard that it never writes.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
@@ -42,6 +43,7 @@ from openrag_lab.domain.shared.enums import DocumentStatus
 from openrag_lab.domain.shared.errors import NotFoundError
 from openrag_lab.domain.shared.ids import DocumentId, TenantId, UserId
 from openrag_lab.infrastructure.db import models  # noqa: F401
+from openrag_lab.infrastructure.db import session as db_session
 from openrag_lab.infrastructure.db.base import Base
 from openrag_lab.infrastructure.db.repositories.identity import (
     SqlDocumentRepository,
@@ -698,16 +700,14 @@ def cli_database(tmp_path, monkeypatch: pytest.MonkeyPatch):
     that drives the CLI has to start from an unbound process — exactly like a
     real invocation does.
     """
-    from openrag_lab.infrastructure.db.session import reset_db
-
     monkeypatch.setattr(
         get_settings(), "database_url", f"sqlite+aiosqlite:///{tmp_path / 'cli.db'}"
     )
-    reset_db()
+    asyncio.run(db_session.reset_db())
     try:
         yield tmp_path / "cli.db"
     finally:
-        reset_db()
+        asyncio.run(db_session.reset_db())
 
 
 def test_the_cli_exits_non_zero_for_an_unknown_tenant(cli_database) -> None:
@@ -799,8 +799,6 @@ class _DrillGateway:
 
 def _seed_drill_rows(factory) -> None:
     """Every category, plus the three controls that must stay silent."""
-    import asyncio
-
     from openrag_lab.domain.identity.models import Document, Tenant, User
     from openrag_lab.infrastructure.db.repositories.identity import (
         SqlDocumentRepository,
@@ -856,10 +854,9 @@ def _run_cli(monkeypatch, cli_database, gateway: _DrillGateway, *args: str):
     """
     import asyncio
 
-    from openrag_lab.infrastructure.db import session as db_session
     from openrag_lab.infrastructure.openrag import openrag_port_impl
 
-    db_session.reset_db()
+    asyncio.run(db_session.reset_db())
     asyncio.run(db_session.create_all())
     factory = async_sessionmaker(db_session._engine, expire_on_commit=False)
     _seed_drill_rows(factory)
@@ -917,12 +914,9 @@ def test_the_operator_facing_report_is_strict_about_a_dirty_registry(
 
 def test_a_clean_registry_reports_clean_and_exits_zero(cli_database, monkeypatch) -> None:
     """反向守卫: 干净库必须真的安静(否则告警会被无视)。"""
-    import asyncio
-
-    from openrag_lab.infrastructure.db import session as db_session
     from openrag_lab.infrastructure.openrag import openrag_port_impl
 
-    db_session.reset_db()
+    asyncio.run(db_session.reset_db())
     asyncio.run(db_session.create_all())
     factory = async_sessionmaker(db_session._engine, expire_on_commit=False)
 

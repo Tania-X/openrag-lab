@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -40,7 +40,7 @@ def init_db(database_url: str | None = None) -> AsyncEngine:
     global _engine, _session_factory
     url = database_url or _default_database_url()
     if _engine is not None:
-        if str(_engine.url) != str(make_url(url)):
+        if not _same_database(_engine.url, make_url(url)):
             raise RuntimeError(
                 "init_db() was called with a different database than the one this "
                 f"process is already using ({_engine.url} != {url}); call reset_db() "
@@ -56,11 +56,31 @@ def init_db(database_url: str | None = None) -> AsyncEngine:
     return _engine
 
 
-def reset_db() -> None:
-    """Reset cached engine/session factory (mainly for tests)."""
+async def reset_db() -> None:
+    """Release the process engine and unbind it (tests, and startup failure).
+
+    Disposing is part of the job, not an optional extra: dropping the reference
+    leaves aiosqlite connections to be garbage-collected after their event loop
+    is gone, which surfaces as an ignored ``Connection.__del__`` exception. One
+    way to release the database, used by everything that switches databases.
+    """
     global _engine, _session_factory
-    _engine = None
+    engine, _engine = _engine, None
     _session_factory = None
+    if engine is not None:
+        await engine.dispose()
+
+
+def _same_database(left: URL, right: URL) -> bool:
+    """Whether two URLs point at the same database, credentials included.
+
+    Compares the URL *objects*, never their strings: ``str(URL)`` renders the
+    password as ``***``, so two URLs differing only in credentials would compare
+    equal and the guard in :func:`init_db` would let the switch through — the
+    exact silent substitution that guard exists to stop. ``URL.__eq__`` compares
+    the parsed parts, password included.
+    """
+    return left == right
 
 
 async def create_all() -> None:
