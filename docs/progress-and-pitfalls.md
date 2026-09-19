@@ -503,3 +503,77 @@ PR #10（OpenAPI 契约改为生成 + 守卫）第 4 轮 AI Review 通过（78/1
 2. **`AsyncSession` 与并发**：写并发测试时容易顺手让多个任务共用一条 session
    （会出 SAWarning / CancelledError）。应用里是"一请求一 session"，测试也必须照做
    （阶段 0 那次也踩过同样的坑）。
+
+---
+
+## 十三、登记表状态机 P2：逻辑删除与墓碑（2026-09-19）
+
+设计见 `docs/document-registry-state-design.md` §5.2 / §10.1b。P2 回答的是"删除了之后，
+本地那行该怎么办"，答案是：**不删行，留墓碑**。
+
+### 为什么是逻辑删除
+
+P1 消灭的情形 A（远端有、本地无）有一个更根本的成因：**删行会销毁"这个文件名曾经登记过"
+的唯一记录**。远端删除失败时，那行被删掉之后就再没有任何东西指向远端残留 —— 既查不到，
+也无法通过 API 删除。墓碑把这个信息保住了：
+
+- 删除是**意图先行**的：`DELETING`（提交）→ 调 OpenRAG → `DELETED` 墓碑；
+- 行留在库里，用户列表**看不到**它（已删的东西再列出来会读成"删除没生效"），
+  检索边界也进不去（只有 `INDEXED` 进）；
+- 同名重传**复活**这一行（同 `id`、保留 `created_at`）——
+  `(tenant_id, stored_filename)` 这个键从不释放。
+
+### 三种结局，一种不留痕就会撒谎
+
+删除调用有三种结果，P2 用 `RagOutcomeUnknownError`（端口契约，`domain/rag/ports.py`）
+把它们分开，适配器负责分类（应用层不再解读 OpenRAG 的状态码）：
+
+| 远端结局 | 本地 | 响应 |
+|---|---|---|
+| 删掉了 / 本来就没有（404 + `success=false, deleted_chunks=0`） | `DELETED`，有定论 | 200, `confirmed=true` |
+| 超时 / 连接断（**没有定论**） | `DELETED` + `remote_outcome_unknown=true` | 200, `confirmed=false` |
+| 明确拒绝（5xx 等） | 留在 `DELETING`（非终态，可被对账接手） | 502 |
+
+第三行是"删除失败"的正常样子：**不回退成 `INDEXED`**（那是撒谎），而是停在一个能查出来的
+状态。第一、二行的差别是"事实"与"猜测"，所以响应里报 `confirmed` —— 报一句光秃秃的"已删除"
+就等于让猜测冒充事实。
+
+同一条道理也用在了上传侧：入库超时会把 `FAILED` 行标成 `remote_outcome_unknown=true`。
+**这是 P1 评审那条意见的正确修法** —— 评审担心"远端可能已写入，本地却是 FAILED"，
+它给的建议是"失败前先探活，有就标 INDEXED"；那会把一个可能还在写、或半写坏的文档
+推进检索边界（违反 I1）。正确的做法不是猜存在性，而是**把"不知道"如实记下来**。
+
+### 状态机自己挡住比赛，不靠守卫堆叠
+
+三种 409 全部由领域方法拒绝非法边得到，而不是在服务层加 if：
+
+```text
+mark_indexing: INDEXING/DELETING → 冲突   （上传撞在途上传 / 撞在途删除）
+mark_deleting: INDEXING/DELETING/DELETED → 冲突   （删除撞在途上传 / 撞在途删除）
+```
+
+两条合起来使得"上传的晋升覆盖掉一次在途删除"**没有可达的交错**：删除不会在 `INDEXING`
+时开始，上传也不会在 `DELETING` 时开始。P1 的临时守卫因此不是被删掉，而是被状态机接管。
+
+### 契约变更（有意）
+
+- `DELETE` 响应多一个 `confirmed` 字段（见上表）；
+- 墓碑名再次删除 → **404**（它已经不是文档；未确认的重试交给对账，不走请求路径）；
+- `GET /api/documents` 不返回墓碑，但返回 `deleting`（那件事还在进行中）。
+
+### 实测与回归
+
+- 221 个测试通过；8 个 P2 守卫做过变异验证（见 commit message 清单）；
+- 迁移推广为 `openrag-lab migrate-registry`（一条命令覆盖各期，逐列判断），
+  旧名 `migrate-registry-status` 保留为别名；
+- 新增列 `remote_outcome_unknown`（默认 FALSE）—— 用**字段**而不是 `status_reason`
+  里的措辞来表达"没有定论"，否则解析措辞的代码会在文案改动时静默失效。
+
+### 一条值得记住的坑
+
+**给假网关（端口替身）加能力时，别忘了替身也要跟着契约走**：端点测试里的
+`FakeDocumentGateway` 实现的是**端口**，所以它现在必须返回归一化后的
+`{"deleted_chunks", "already_absent"}` 或抛 `RagOutcomeUnknownError`，
+不能再返回 OpenRAG 的原始 payload。适配器的分类逻辑则单独在
+`tests/rag/test_openrag_gateway.py` 用假 client 测 —— 两层各自测自己那层，
+替换掉任一层都不会让另一层的测试变成空转。

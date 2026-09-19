@@ -31,3 +31,9 @@ class DeleteDocumentOut(BaseModel):
     filename: str
     stored_filename: str
     deleted_chunks: int
+    #: Whether OpenRAG actually gave a verdict for this delete. ``false`` means
+    #: the outcome is unknown (timeout/no response): the document is out of the
+    #: retrieval boundary either way, but it may still occupy space remotely
+    #: until reconciliation verifies it. Reporting this matters — answering a
+    #: bare "deleted" would let a guess pass as a fact.
+    confirmed: bool = True

@@ -36,8 +36,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openrag_lab.client import OpenRAGClient
+from openrag_lab.client import OpenRAGClient, OpenRAGError
 from openrag_lab.config import get_settings
+from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,37 @@ logger = logging.getLogger(__name__)
 #: connection pool alive, so the ceiling bounds sockets rather than memory. A
 #: tenant pushed out of the cache is simply rebuilt on its next call.
 MAX_CACHED_CLIENTS = 64
+
+
+def _translate_unknown_outcome(
+    exc: OpenRAGError, *, operation: str
+) -> Exception:
+    """Map a transport-level OpenRAG failure onto the port's "no verdict" error.
+
+    ``OpenRAGClient`` leaves ``status_code`` unset exactly when no HTTP response
+    was received (timeout, connection loss) — see its ``_request``. That is the
+    observable difference between "OpenRAG answered and refused" and "we never
+    found out", and it is the adapter's job to translate it: the application
+    must not read adapter-specific error shapes.
+    """
+    if exc.status_code is None:
+        return RagOutcomeUnknownError(str(exc), operation=operation)
+    return exc
+
+
+def _nothing_to_delete(exc: OpenRAGError) -> bool:
+    """True when OpenRAG reports that no chunks matched the filename.
+
+    Field-based on purpose, mirroring ``reingest._nothing_to_delete``: matching
+    the error wording instead would turn a message change into a false "delete
+    failed". A 404 without that shape (a routing mistake, say) stays an error.
+    """
+    payload = exc.payload if isinstance(exc.payload, dict) else {}
+    return (
+        exc.status_code == 404
+        and payload.get("success") is False
+        and int(payload.get("deleted_chunks") or 0) == 0
+    )
 
 
 @dataclass
@@ -268,11 +300,30 @@ class OpenRAGGateway:
             # wait=True: the caller only registers the document once OpenRAG
             # reports the task finished, so the registry never claims a
             # document that failed to index.
-            return client.ingest_file(path, wait=True, filename=stored_filename)
+            try:
+                return client.ingest_file(path, wait=True, filename=stored_filename)
+            except OpenRAGError as exc:
+                raise _translate_unknown_outcome(exc, operation="ingest") from exc
 
     def delete_document(self, *, api_key: str, stored_filename: str) -> dict[str, Any]:
         with self._borrow(api_key) as client:
-            return client.delete_document(stored_filename)
+            try:
+                payload = client.delete_document(stored_filename)
+            except OpenRAGError as exc:
+                if _nothing_to_delete(exc):
+                    # OpenRAG answers "no chunks matched" with 404. Nothing to
+                    # remove is a settled delete, not a failure: the caller only
+                    # needs to know the name is no longer usable.
+                    return {"deleted_chunks": 0, "already_absent": True}
+                raise _translate_unknown_outcome(exc, operation="delete") from exc
+            if not isinstance(payload, dict):
+                # A 2xx with no body still settles the delete; report "removed
+                # nothing rather than an unknown count" instead of inventing one.
+                return {"deleted_chunks": 0, "already_absent": False}
+            return {
+                "deleted_chunks": int(payload.get("deleted_chunks") or 0),
+                "already_absent": False,
+            }
 
     def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
         with self._borrow(api_key) as client:

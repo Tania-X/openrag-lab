@@ -1,8 +1,11 @@
-"""Domain tests for the document registry state machine (P1).
+"""Domain tests for the document registry state machine (P1 + P2).
 
 The state graph is docs/document-registry-state-design.md §4; these tests pin the
 transitions themselves, including the ones that must be **refused** — a state
 machine whose illegal edges are not rejected is just a string column.
+
+P2 adds the delete side (``DELETING`` -> ``DELETED``) with the tombstone rule:
+the row survives the delete, and the row records whether OpenRAG confirmed it.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ def _document(
     status: DocumentStatus = DocumentStatus.INDEXED,
     status_reason: str | None = None,
     openrag_document_id: str | None = None,
+    remote_outcome_unknown: bool = False,
 ) -> Document:
     """A registry row; explicit keywords keep mypy able to check the call."""
     return Document(
@@ -36,6 +40,7 @@ def _document(
         status=status,
         status_reason=status_reason,
         openrag_document_id=openrag_document_id,
+        remote_outcome_unknown=remote_outcome_unknown,
     )
 
 
@@ -112,3 +117,113 @@ def test_transitions_bump_updated_at() -> None:
     document.mark_indexed("id")
 
     assert document.updated_at > aged
+
+
+# ── P2: the delete side ────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("start", [DocumentStatus.INDEXED, DocumentStatus.FAILED])
+def test_mark_deleting_from_indexed_and_from_failed(start: DocumentStatus) -> None:
+    """Both live states can be deleted; FAILED rows must not be stuck."""
+    document = _document(status=start, status_reason="boom")
+    document.mark_deleting()
+    assert document.status is DocumentStatus.DELETING
+    assert document.status_reason is None, "the new operation clears the old reason"
+
+
+@pytest.mark.parametrize(
+    "start", [DocumentStatus.INDEXING, DocumentStatus.DELETING, DocumentStatus.DELETED]
+)
+def test_mark_deleting_is_refused_while_the_name_is_busy_or_gone(
+    start: DocumentStatus,
+) -> None:
+    """INDEXING/DELETING: another operation owns the name → conflict.
+
+    DELETED: there is nothing left to delete. The service answers 404 before it
+    gets here (a tombstone is not a document), so reaching this means a caller
+    bypassed that check — still a conflict, never a second remote delete.
+    """
+    document = _document(status=start)
+    with pytest.raises(ConflictError):
+        document.mark_deleting()
+
+
+def test_mark_indexing_is_refused_while_a_delete_is_in_flight() -> None:
+    """The other half of the same rule: an upload must not race a delete.
+
+    This is the upload-vs-delete conflict the API answers with 409 — letting it
+    through would let one caller's ingest overwrite the other's removal.
+    """
+    document = _document(status=DocumentStatus.DELETING)
+    with pytest.raises(ConflictError):
+        document.mark_indexing()
+
+
+def test_mark_deleted_records_a_confirmed_removal() -> None:
+    document = _document(status=DocumentStatus.DELETING)
+    document.mark_deleted(confirmed=True, detail="removed 3 chunk(s)")
+
+    assert document.status is DocumentStatus.DELETED
+    assert document.status_reason == "removed 3 chunk(s)"
+    assert document.remote_outcome_unknown is False
+
+
+def test_mark_deleted_without_a_verdict_is_flagged_as_unknown() -> None:
+    """A timeout still deletes (the name left the retrieval boundary), but the
+    row must say the outcome was never confirmed — that flag is the worklist
+    reconciliation reads, and prose in status_reason is not a substitute."""
+    document = _document(status=DocumentStatus.DELETING)
+    document.mark_deleted(confirmed=False, detail="no verdict from OpenRAG: Timeout")
+
+    assert document.status is DocumentStatus.DELETED
+    assert document.remote_outcome_unknown is True
+
+
+@pytest.mark.parametrize(
+    "start",
+    [DocumentStatus.INDEXED, DocumentStatus.FAILED, DocumentStatus.INDEXING],
+)
+def test_mark_deleted_is_only_legal_from_deleting(start: DocumentStatus) -> None:
+    """Concluding a delete that never started would record a removal OpenRAG was
+    never asked to perform."""
+    document = _document(status=start)
+    with pytest.raises(InvalidOperationError):
+        document.mark_deleted(confirmed=True, detail="nope")
+
+
+def test_a_deleted_name_can_be_re_uploaded_on_the_same_row() -> None:
+    """Resurrection: the tombstone keeps the key, so a re-upload reuses the row.
+
+    Keeping the row is what makes this work — a hard delete would have to
+    re-create the identity, and `(tenant_id, stored_filename)` is unique.
+    """
+    document = _document(
+        status=DocumentStatus.DELETED,
+        status_reason="no verdict from OpenRAG: Timeout",
+        remote_outcome_unknown=True,
+    )
+    document.mark_indexing()
+
+    assert document.status is DocumentStatus.INDEXING
+    assert document.status_reason is None
+    assert document.remote_outcome_unknown is False, "the retry is not a stale unknown"
+
+
+def test_marking_failed_can_record_that_openrag_never_answered() -> None:
+    """An ingest timeout means the document may exist remotely; the row has to
+    say so, or reconciliation cannot tell it apart from a clean refusal."""
+    clean = _document(status=DocumentStatus.INDEXING)
+    clean.mark_failed("InvalidOperationError: status=failed")
+    assert clean.remote_outcome_unknown is False
+
+    timed_out = _document(status=DocumentStatus.INDEXING)
+    timed_out.mark_failed("no verdict from OpenRAG: Timeout", outcome_unknown=True)
+    assert timed_out.status is DocumentStatus.FAILED
+    assert timed_out.remote_outcome_unknown is True
+
+
+def test_promotion_clears_a_stale_unknown_flag() -> None:
+    """A row that ends up INDEXED has a verdict by definition."""
+    document = _document(status=DocumentStatus.INDEXING, remote_outcome_unknown=True)
+    document.mark_indexed("id")
+    assert document.remote_outcome_unknown is False

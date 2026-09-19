@@ -15,11 +15,14 @@ import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from openrag_lab.client import OpenRAGError
 from openrag_lab.config import get_settings
+from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
 from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
 
 
@@ -27,6 +30,10 @@ class FakeClient:
     """Stands in for OpenRAGClient and records how it was used."""
 
     instances: list[FakeClient] = []
+
+    #: Set by a test to steer the next delete/ingest call. Class-level because
+    #: the gateway builds its client lazily, inside the call under test.
+    behavior: dict[str, Any] = {}
 
     def __init__(self, base_url: str, api_key: str, ingest_timeout: float | None = None) -> None:
         self.base_url = base_url
@@ -53,12 +60,29 @@ class FakeClient:
         self.calls.append(("chat", {"message": message, **kwargs}))
         return {"response": "ok"}
 
+    def delete_document(self, filename: str) -> Any:
+        self.calls.append(("delete_document", {"filename": filename}))
+        if "delete_error" in FakeClient.behavior:
+            raise FakeClient.behavior["delete_error"]
+        return FakeClient.behavior.get(
+            "delete_payload", {"success": True, "deleted_chunks": 3}
+        )
+
+    def ingest_file(
+        self, path: Any, wait: bool = True, filename: str | None = None
+    ) -> dict[str, Any]:
+        self.calls.append(("ingest_file", {"path": str(path), "wait": wait, "filename": filename}))
+        if "ingest_error" in FakeClient.behavior:
+            raise FakeClient.behavior["ingest_error"]
+        return {"status": "completed"}
+
 
 @pytest.fixture(autouse=True)
 def _reset_instances() -> Iterator[None]:
     """Clear the shared instance list *after* each test, not before it."""
     yield
     FakeClient.instances = []
+    FakeClient.behavior = {}
 
 
 def test_search_targets_the_configured_openrag_instance(
@@ -358,3 +382,114 @@ def test_a_zero_ceiling_does_not_hand_out_a_closed_client() -> None:
     assert len(client.calls) == 1, "调用必须真的发出去"
     gateway.close()
     assert client.closed is True
+
+
+# ── P2: 删除/上传的结局分类 ────────────────────────────────────────────────
+# 端口契约有三种结局, 而它们的区别正是"能不能相信这一行"的全部依据:
+#   * 正常返回        = 有定论(删掉了, 或远端本来就没有)
+#   * RagOutcomeUnknownError = 没有定论(超时/连接断)
+#   * 其它异常        = 明确的拒绝(远端答了, 说不)
+# 这些分类只能在适配器里做(它知道 OpenRAG 的状态码约定), 所以必须在这一层测。
+
+
+def test_a_missing_document_is_a_settled_delete_not_a_failure() -> None:
+    """OpenRAG 对"没有匹配的分块"回 404 —— 那是"已经没有了", 不是失败。"""
+    FakeClient.behavior = {
+        "delete_error": OpenRAGError(
+            "OpenRAG DELETE /api/v1/documents -> 404",
+            status_code=404,
+            payload={"success": False, "deleted_chunks": 0},
+        )
+    }
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        result = gateway.delete_document(api_key="k", stored_filename="acme/gone.md")
+    finally:
+        gateway.close()
+
+    assert result == {"deleted_chunks": 0, "already_absent": True}
+
+
+def test_a_bare_404_is_not_swallowed() -> None:
+    """反向守卫: 形状不对的 404(例如路由写错了)必须照旧抛错。
+
+    只看状态码会把"我调错了地址"读成"文档已经没了" —— 那会让删除静默地什么都没做。
+    """
+    FakeClient.behavior = {
+        "delete_error": OpenRAGError("not found", status_code=404, payload={"detail": "no route"})
+    }
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        with pytest.raises(OpenRAGError):
+            gateway.delete_document(api_key="k", stored_filename="acme/x.md")
+    finally:
+        gateway.close()
+
+
+def test_a_transport_failure_on_delete_means_no_verdict() -> None:
+    """超时/连接断: 不知道远端有没有删掉 → 端口返回"无定论"。"""
+    FakeClient.behavior = {"delete_error": OpenRAGError("OpenRAG request failed: timeout")}
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        with pytest.raises(RagOutcomeUnknownError) as caught:
+            gateway.delete_document(api_key="k", stored_filename="acme/x.md")
+    finally:
+        gateway.close()
+
+    assert caught.value.operation == "delete"
+
+
+def test_a_server_error_is_a_refusal_not_an_unknown_outcome() -> None:
+    """远端答了 500: 那是"明确拒绝", 不是"不知道" —— 两者对状态机是不同的迁移。
+
+    混为一谈会让一个其实没删掉的行被记成"未确认的删除", 而它真正需要的是重试。
+    """
+    FakeClient.behavior = {
+        "delete_error": OpenRAGError("boom", status_code=500, payload={"detail": "internal"})
+    }
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        with pytest.raises(OpenRAGError) as caught:
+            gateway.delete_document(api_key="k", stored_filename="acme/x.md")
+    finally:
+        gateway.close()
+
+    assert not isinstance(caught.value, RagOutcomeUnknownError)
+
+
+def test_a_transport_failure_on_ingest_means_no_verdict() -> None:
+    """上传也一样: 远端可能已经写入, 只是没答复。"""
+    FakeClient.behavior = {"ingest_error": OpenRAGError("OpenRAG request failed: read timeout")}
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        with pytest.raises(RagOutcomeUnknownError) as caught:
+            gateway.ingest_document(
+                api_key="k", stored_filename="acme/x.md", path=Path("/tmp/x.md")
+            )
+    finally:
+        gateway.close()
+
+    assert caught.value.operation == "ingest"
+
+
+def test_a_successful_delete_normalises_to_the_port_shape() -> None:
+    """成功路径也归一化: 调用方只认 deleted_chunks/already_absent 两个字段。"""
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        result = gateway.delete_document(api_key="k", stored_filename="acme/x.md")
+    finally:
+        gateway.close()
+
+    assert result == {"deleted_chunks": 3, "already_absent": False}
+
+
+def test_a_successful_delete_without_a_body_still_settles() -> None:
+    """2xx 但没 body: 仍然是"删掉了", 只是块数未知 —— 不能编一个数字。"""
+    FakeClient.behavior = {"delete_payload": None}
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        result = gateway.delete_document(api_key="k", stored_filename="acme/x.md")
+    finally:
+        gateway.close()
+
+    assert result == {"deleted_chunks": 0, "already_absent": False}

@@ -254,8 +254,17 @@ class Document:
     #: Document describes a document that *is* usable; the upload path opts into
     #: INDEXING explicitly before it calls OpenRAG.
     status: DocumentStatus = DocumentStatus.INDEXED
-    #: Why the row is FAILED (kept internal: it can quote upstream errors).
+    #: Why the row is not in a clean terminal state (kept internal: it can quote
+    #: upstream errors). Human-facing context only — machine decisions must read
+    #: a real field, never this text.
     status_reason: str | None = None
+    #: True when the local state was concluded without a verdict from OpenRAG
+    #: (timeout, connection lost). The remote may or may not have applied the
+    #: operation, so reconciliation has to verify the row before trusting it —
+    #: this flag is the worklist predicate (`WHERE remote_outcome_unknown`), and
+    #: it is a column rather than a phrase in ``status_reason`` because parsing
+    #: prose to drive recovery breaks the moment the wording changes.
+    remote_outcome_unknown: bool = False
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
@@ -270,15 +279,27 @@ class Document:
     def mark_indexing(self) -> None:
         """Record the intent to index (or re-index) this document.
 
-        Reached from ``INDEXED`` (a replacement upload) and from ``FAILED`` (a
-        retry); the row itself is kept so ``created_at`` and any known OpenRAG id
-        survive. Already ``INDEXING`` is a conflict: two concurrent uploads of
-        the same name must not both drive the remote state.
+        Reached from ``INDEXED`` (a replacement upload), ``FAILED`` (a retry)
+        and ``DELETED`` (a re-upload of a deleted name — the tombstone is
+        resurrected rather than duplicated, which is why re-uploading a deleted
+        name needs no new row and no new key). The row itself is kept so
+        ``created_at`` and any known OpenRAG id survive.
+
+        ``INDEXING`` and ``DELETING`` are conflicts: two operations must not
+        drive the remote state for one name at the same time, and only one of
+        the two directions can win. (The stale in-memory copy cannot cause this
+        — the delete path refuses to start on an ``INDEXING`` row, so the two
+        guards together leave no interleaving that turns a delete into an
+        overwrite.)
         """
-        if self.status is DocumentStatus.INDEXING:
-            raise ConflictError(f"Document is already being indexed: {self.display_name}")
+        if self.status in (DocumentStatus.INDEXING, DocumentStatus.DELETING):
+            raise ConflictError(
+                f"Document is already being changed ({self.status.value}): "
+                f"{self.display_name}"
+            )
         self.status = DocumentStatus.INDEXING
         self.status_reason = None
+        self.remote_outcome_unknown = False
         self.updated_at = datetime.now(UTC)
 
     def mark_indexed(self, openrag_document_id: str | None = None) -> None:
@@ -298,10 +319,18 @@ class Document:
             self.openrag_document_id = openrag_document_id
         self.status = DocumentStatus.INDEXED
         self.status_reason = None
+        self.remote_outcome_unknown = False
         self.updated_at = datetime.now(UTC)
 
-    def mark_failed(self, reason: str) -> None:
-        """Record that ingestion failed, keeping the row discoverable."""
+    def mark_failed(self, reason: str, *, outcome_unknown: bool = False) -> None:
+        """Record that ingestion failed, keeping the row discoverable.
+
+        ``outcome_unknown`` records that OpenRAG never gave a verdict (a
+        timeout): the document may exist remotely even though this row says
+        ``FAILED``. Marking it is not pessimism — it is the difference between
+        "nothing was written" and "we do not know", and only that difference
+        tells reconciliation whether a probe is needed.
+        """
         if self.status is not DocumentStatus.INDEXING:
             raise InvalidOperationError(
                 f"Document is not being indexed (status={self.status.value}): "
@@ -309,6 +338,51 @@ class Document:
             )
         self.status = DocumentStatus.FAILED
         self.status_reason = reason[:MAX_STATUS_REASON_LENGTH]
+        self.remote_outcome_unknown = outcome_unknown
+        self.updated_at = datetime.now(UTC)
+
+    def mark_deleting(self) -> None:
+        """Record the intent to delete: the row survives until OpenRAG agrees.
+
+        This is a hand-rolled finalizer (design §5.2): the registry row is the
+        only record that this name was ever registered here, so it must not be
+        dropped before the remote side is settled — otherwise a failed delete
+        leaves content nobody tracks and nobody can delete through the API.
+        """
+        if self.status in (
+            DocumentStatus.INDEXING,
+            DocumentStatus.DELETING,
+            DocumentStatus.DELETED,
+        ):
+            # INDEXING: an upload is in flight; letting the delete through would
+            # race with its promotion. DELETING: another delete is already
+            # driving the remote. DELETED: there is nothing left to delete (the
+            # caller gets 404, not a conflict — see the service).
+            raise ConflictError(
+                f"Document is already being changed ({self.status.value}): "
+                f"{self.display_name}"
+            )
+        self.status = DocumentStatus.DELETING
+        self.status_reason = None
+        self.remote_outcome_unknown = False
+        self.updated_at = datetime.now(UTC)
+
+    def mark_deleted(self, *, confirmed: bool, detail: str) -> None:
+        """Conclude the removal and keep the row as a tombstone.
+
+        ``confirmed`` says whether OpenRAG gave a verdict. A timeout still lands
+        here (the tenant-visible effect of the delete already holds: the name is
+        out of the retrieval boundary), but it is flagged so reconciliation can
+        come back and finish the job instead of trusting a guess.
+        """
+        if self.status is not DocumentStatus.DELETING:
+            raise InvalidOperationError(
+                f"Document is not being deleted (status={self.status.value}): "
+                f"{self.display_name}"
+            )
+        self.status = DocumentStatus.DELETED
+        self.status_reason = detail[:MAX_STATUS_REASON_LENGTH]
+        self.remote_outcome_unknown = not confirmed
         self.updated_at = datetime.now(UTC)
 
     def rename(self, display_name: str) -> None:

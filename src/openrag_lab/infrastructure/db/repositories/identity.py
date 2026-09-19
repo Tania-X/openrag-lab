@@ -442,6 +442,7 @@ def _document_to_domain(model: DocumentModel) -> Document:
         openrag_document_id=model.openrag_document_id,
         status=_coerce_document_status(model.status),
         status_reason=model.status_reason,
+        remote_outcome_unknown=model.remote_outcome_unknown,
         created_at=_ensure_utc(model.created_at),
         updated_at=_ensure_utc(model.updated_at),
     )
@@ -459,6 +460,7 @@ def _document_to_model(document: Document) -> DocumentModel:
         openrag_document_id=document.openrag_document_id,
         status=document.status,
         status_reason=document.status_reason,
+        remote_outcome_unknown=document.remote_outcome_unknown,
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
@@ -499,6 +501,7 @@ class SqlDocumentRepository:
         model.openrag_document_id = document.openrag_document_id
         model.status = document.status
         model.status_reason = document.status_reason
+        model.remote_outcome_unknown = document.remote_outcome_unknown
         model.updated_at = document.updated_at
 
     async def find_by_id(self, document_id: DocumentId) -> Document | None:
@@ -518,9 +521,21 @@ class SqlDocumentRepository:
         return _document_to_domain(model) if model else None
 
     async def list_by_tenant(self, tenant_id: TenantId) -> list[Document]:
+        """The tenant's documents, tombstones excluded.
+
+        A ``DELETED`` row is bookkeeping, not a document: the caller asked for it
+        to be gone, so showing it back with ``status=deleted`` would read as
+        "the delete did not work". ``DELETING`` *is* listed — that removal is
+        still in flight, and hiding it would hide a document the tenant can
+        still search for a moment longer. Reconciliation reads tombstones from
+        the database, not from this list.
+        """
         result = await self._session.execute(
             select(DocumentModel)
-            .where(DocumentModel.tenant_id == tenant_id.value)
+            .where(
+                DocumentModel.tenant_id == tenant_id.value,
+                DocumentModel.status != DocumentStatus.DELETED,
+            )
             .order_by(DocumentModel.created_at)
         )
         return [_document_to_domain(m) for m in result.scalars().all()]

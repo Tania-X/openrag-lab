@@ -99,6 +99,10 @@ components:
       type: object
     DeleteDocumentOut:
       properties:
+        confirmed:
+          default: true
+          title: Confirmed
+          type: boolean
         deleted_chunks:
           title: Deleted Chunks
           type: integer
@@ -617,9 +621,13 @@ paths:
       description: 'Store an uploaded file in OpenRAG under the tenant''s namespace.
 
 
-        The document is registered only after OpenRAG reports the ingestion task
+        The registry row is written *before* OpenRAG is called (``status=indexing``)
 
-        finished, so a failed ingest leaves no registry entry behind.'
+        and promoted to ``indexed`` only once the ingestion task reports success, so
+
+        a failed ingest leaves a discoverable ``failed`` row rather than nothing at
+
+        all. Only ``indexed`` documents take part in retrieval.'
       operationId: ingest_document_api_documents_ingest_post
       requestBody:
         content:
