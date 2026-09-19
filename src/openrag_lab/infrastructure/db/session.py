@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from pathlib import Path
 
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -27,11 +27,27 @@ def _default_database_url() -> str:
 
 
 def init_db(database_url: str | None = None) -> AsyncEngine:
+    """Bind the process to one database and return its engine.
+
+    **The first call wins**, and a later call naming a *different* database is an
+    error rather than a no-op. It used to be a silent no-op, which meant any
+    caller that asked for its database second got the first one: ``create_all()``
+    ran with no URL, so a command that called it before ``get_session()`` read and
+    wrote ``data/openrag-lab.db`` no matter what ``DATABASE_URL`` said. A wrong
+    database that announces itself is a bug report; one that does not is an
+    incident. Call :func:`reset_db` if a switch is really intended (tests do).
+    """
     global _engine, _session_factory
+    url = database_url or _default_database_url()
     if _engine is not None:
+        if not _same_database(_engine.url, make_url(url)):
+            raise RuntimeError(
+                "init_db() was called with a different database than the one this "
+                f"process is already using ({_engine.url} != {url}); call reset_db() "
+                "first if switching is intended"
+            )
         return _engine
 
-    url = database_url or _default_database_url()
     parsed = make_url(url)
     if parsed.get_backend_name() == "sqlite" and parsed.database not in (None, "", ":memory:"):
         Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
@@ -40,11 +56,31 @@ def init_db(database_url: str | None = None) -> AsyncEngine:
     return _engine
 
 
-def reset_db() -> None:
-    """Reset cached engine/session factory (mainly for tests)."""
+async def reset_db() -> None:
+    """Release the process engine and unbind it (tests, and startup failure).
+
+    Disposing is part of the job, not an optional extra: dropping the reference
+    leaves aiosqlite connections to be garbage-collected after their event loop
+    is gone, which surfaces as an ignored ``Connection.__del__`` exception. One
+    way to release the database, used by everything that switches databases.
+    """
     global _engine, _session_factory
-    _engine = None
+    engine, _engine = _engine, None
     _session_factory = None
+    if engine is not None:
+        await engine.dispose()
+
+
+def _same_database(left: URL, right: URL) -> bool:
+    """Whether two URLs point at the same database, credentials included.
+
+    Compares the URL *objects*, never their strings: ``str(URL)`` renders the
+    password as ``***``, so two URLs differing only in credentials would compare
+    equal and the guard in :func:`init_db` would let the switch through — the
+    exact silent substitution that guard exists to stop. ``URL.__eq__`` compares
+    the parsed parts, password included.
+    """
+    return left == right
 
 
 async def create_all() -> None:
@@ -55,7 +91,12 @@ async def create_all() -> None:
     Columns added to an existing table are NOT applied here; Alembic is the
     long-term answer for those.
     """
-    engine = init_db()
+    from openrag_lab.config import get_settings
+
+    # Must ask for the configured database explicitly: init_db() with no URL
+    # falls back to the default path, and whichever call arrives first is the one
+    # this process is bound to.
+    engine = init_db(get_settings().database_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

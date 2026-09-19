@@ -315,10 +315,14 @@ def render_report(report: ReconcileReport) -> str:
     )
     lines.append(f"unsettled rows: {len(report.findings)}")
     for finding in report.findings:
-        flag = " [remote outcome unknown]" if finding.remote_outcome_unknown else ""
+        flag = " | remote outcome unknown" if finding.remote_outcome_unknown else ""
+        # One field per line, and the name on a line of its own: names are
+        # user-supplied and can be long enough to wrap, and a wrapped name used to
+        # push "age=… status=…" onto a merged continuation line.
+        lines.append(f"  [{finding.category}] {finding.stored_filename}")
         lines.append(
-            f"  [{finding.category}] {finding.tenant_slug} {finding.stored_filename}"
-            f" age={_age(finding.age_seconds)} status={finding.status.value}{flag}"
+            f"      tenant {finding.tenant_slug} | age {_age(finding.age_seconds)}"
+            f" | status {finding.status.value}{flag}"
         )
         lines.append(f"      next: {finding.action}")
         if finding.reason:
@@ -354,9 +358,17 @@ def _minutes(seconds: float) -> str:
 
 
 def _age(seconds: float) -> str:
+    """Age in units a person reads, coarsening as it grows.
+
+    Hours stop being readable surprisingly fast — a 400-day-old row printed as
+    ``9600.0h`` (the first version) is a number, not an age. Minutes, then hours,
+    then days; triage does not need more precision than that.
+    """
     if seconds < 3600:
         return f"{seconds / 60:.1f}m"
-    return f"{seconds / 3600:.1f}h"
+    if seconds < 86400:
+        return f"{seconds / 3600:.1f}h"
+    return f"{seconds / 86400:.1f}d"
 
 
 class ReconcileService:

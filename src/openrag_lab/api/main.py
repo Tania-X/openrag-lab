@@ -73,13 +73,13 @@ async def lifespan(app: FastAPI):
             )
         yield
     except Exception:
-        reset_db()
+        await reset_db()
         raise
     finally:
         # The gateway holds per-tenant HTTP clients (connection pools); they are
         # process-scoped, so they are released here rather than per request.
         close_rag_gateway()
-        await engine.dispose()
+        await reset_db()
 
 
 app = FastAPI(title="OpenRAG Lab API", version="0.1.0", lifespan=lifespan)

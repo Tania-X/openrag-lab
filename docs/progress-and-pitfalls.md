@@ -697,3 +697,83 @@ CLI 用 `[tenant_slug] if tenant_slug else None` 构造过滤：空字符串 fal
 except 提前退出"的隐含前提）。挪前挪后行为**完全相同** —— 只要 except 仍然退出，两条路径
 都不会读到未绑定的变量；哪天 except 被软化，两条路径都会 NameError。它值得改，是因为
 **依赖变局部可见了**，不是因为它改变了行为。
+
+
+---
+
+## 十五、脏库演练：一次演练抓到三件事（2026-09-19）
+
+P3 的报告此前只在**全健康的库**上跑过（58 行全是 `indexed` → 零待办）。决策 5 要求"先只报告
+跑一段时间，确认无副作用后再开自动登记"，所以动 `--fix` 之前先造一个**真脏的库**人眼看一遍。
+
+做法：临时库植入六种 finding + 三个对照组（在途上传 / 已确认墓碑 / 健康行），用**真 CLI**
+跑（`DATABASE_URL=... openrag-lab reconcile`），逐条核对输出。结果抓到三件事——**没有一件
+是单测能发现的**。
+
+### ① P0 级会话接线 bug：`DATABASE_URL` 被静默忽略（既有 bug，不是本次引入）
+
+```python
+async def create_all() -> None:
+    engine = init_db()                      # ← 不传 URL → 硬编码 data/openrag-lab.db
+async def get_session():
+    init_db(get_settings().database_url)    # ← _engine 已缓存 → 静默 no-op
+```
+
+`init_db` 里 `if _engine is not None: return _engine` —— **第一次调用定生死**。于是：
+
+| 调用点 | 是否读从 `DATABASE_URL` |
+|---|---|
+| `api/main.py:57` | ✅（它先 `init_db(settings.database_url)`） |
+| `cli.py:100`（migrate） | ✅ |
+| `cli.py:140`（reconcile） | ❌ 先 `create_all()` |
+| `cli.py:389`（reingest-legacy） | ❌ 先 `create_all()` —— **而且它会写数据** |
+
+演练时我明明是拿 `DATABASE_URL` 隔离演练库的，报告却读了 dev 库（`default` 租户 58 行）。
+**API 那条路先传 URL，所以这个 bug 一直没暴露**。
+
+修法两处，一处治症状一处治陷阱：
+
+1. `create_all()` 显式问配置要库；
+2. `init_db` 在 URL 与已绑定的库**不一致时报错**，而不是静默沿用 ——
+   "一个会自我声明的错库是 bug report，一个不会的是事故"。换库的唯一出路是显式 `reset_db()`
+   （测试用它模拟新进程；两个 CLI 测试因此各加了一次 `reset_db`）。
+
+### ② Rich 把 `[category]` 当样式标签吃掉了
+
+`render_report()` 返回纯文本，CLI 用 `console.print()` 打印 → **Rich 解析 `[failed]` 当成
+样式标签并静默丢弃**：单测断言函数返回值（全绿），而**操作员看到的输出里一个分类标签都没有**。
+这正是"演练才抓得到"的典型：断言对象不是最终产物。
+
+修法：`console.print(render_report(report), markup=False)` —— 渲染函数产出纯文本，控制台不该
+再解释它一遍。
+
+### ③ 年龄格式与布局
+
+- 400 天的行被印成 `age=9600.0h` —— 那是个数字，不是年龄。现在分钟/小时/天三档进位；
+- 长文件名换行后把 `age=… status=…` 挤到续行上糊成一团；现在**一个字段一行**，名字单独占行，
+  租户 slug 收到明细行里（存储名本来就带命名空间前缀）。
+
+### 演练的产物：`test_the_operator_facing_report_*`
+
+四条断言**操作员看到的那一份**的测试（脏库 + 假网关 + 真 CLI 入口）：六个分类标签都在、
+三个对照组必须沉默、`--strict` 退出码、干净库必须真的安静、远端读不到时本地那一半照常。
+以及 `tests/test_session_binding.py`（4 条）钉住会话绑定。
+
+**一条通用教训**：单测断言的是**函数的返回值**，不是**用户看到的东西**。凡是"渲染 → 再加工
+→ 展示"的链路，都必须有一条断言盯着最终产物 —— 否则中间的每一层都能悄悄吃掉信息，
+而测试全绿。
+
+
+### 补记：`reset_db` 必须真的断开连接（评审第 1 轮之后）
+
+评审指出 `str(URL)` 会把密码渲染成 `***`，于是"换库守卫"在"只差密码"时被绕过。实证成立
+（SQLAlchemy 2.0.52：`str(p1) == str(p2)` 为 True，而 `p1 == p2` 为 False），修法是直接比较
+URL 对象（`URL.__eq__` 含密码）。
+
+**修的过程中顺带被 pytest 的告警抓出第二个问题**：`reset_db()` 只丢引用、不断开连接，于是
+aiosqlite 的连接在事件循环结束后被 GC，套件里出现一条 `PytestUnraisableExceptionWarning`。
+生产代码没这个问题（API 在 lifespan 的 `finally` 里 `await engine.dispose()`），但"解绑"这个
+动作本身不该留下半个连接 —— 现在 `reset_db()` 是 async 且真的 dispose，API 与测试共用它。
+
+**告警一多，真问题就淹了**：这条告警本来完全无害，但它是被"跑一遍 -q 时多了一行 warning"抓到的
+—— 如果当时放过，下一个真告警也会长这样。
