@@ -17,6 +17,7 @@ from openrag_lab.comparison import (
 )
 from openrag_lab.config import get_settings
 from openrag_lab.dify import DifyClient
+from openrag_lab.domain.shared.errors import NotFoundError
 from openrag_lab.eval import evaluate_row, load_eval_csv, summarize_results
 from openrag_lab.ingest import ingest_directory
 from openrag_lab.metadata import dify_metadata_to_openrag_filters
@@ -102,6 +103,77 @@ async def _migrate_registry() -> None:
         console.print(f"[green]Added columns:[/green] {', '.join(added)}")
     else:
         console.print("[yellow]Nothing to do:[/yellow] the registry schema is current.")
+
+
+@app.command()
+def reconcile(
+    tenant: str | None = typer.Option(  # noqa: B008
+        None, "--tenant", help="Only this tenant slug (default: every tenant)."
+    ),
+    strict: bool = typer.Option(  # noqa: B008
+        False,
+        "--strict",
+        help="Exit 1 when anything needs attention (for cron / alerting).",
+    ),
+) -> None:
+    """Report where the registry and OpenRAG disagree. Read-only.
+
+    Stage P3 of the registry-state design: it lists rows that may need attention
+    (stuck uploads, stuck deletes, failures, unconfirmed deletes) and documents
+    that exist on only one side. **It never repairs anything** — an automatic
+    repairer amplifies whatever authority it is given, so it ships in report
+    mode first and stays there until the report has been read for a while.
+    """
+    asyncio.run(_reconcile(tenant, strict))
+
+
+async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
+    from openrag_lab.application.rag.reconcile import (
+        ReconcileService,
+        StalenessRules,
+        render_report,
+    )
+    from openrag_lab.infrastructure.db.session import create_all, get_session
+    from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
+
+    settings = get_settings()
+    await create_all()
+    # Thresholds are derived from the budgets they guard, never hand-set: see
+    # StalenessRules for why each factor is what it is.
+    rules = StalenessRules.derive(
+        ingest_timeout_seconds=settings.upload_ingest_timeout_seconds,
+        request_timeout_seconds=settings.openrag_request_timeout_seconds,
+    )
+    gateway = OpenRAGGateway(
+        base_url=settings.openrag_base_url,
+        ingest_timeout=settings.upload_ingest_timeout_seconds,
+    )
+    try:
+        async with asynccontextmanager(get_session)() as session:
+            try:
+                report = await ReconcileService(session, gateway, rules=rules).run(
+                    # `is None` rather than truthiness: an explicitly empty
+                    # `--tenant ""` must reach the service's empty-filter guard
+                    # (which refuses it), not be silently widened into "every
+                    # tenant". Rejecting a bad scope and reporting everything are
+                    # different answers, and the caller asked for the first.
+                    tenant_slugs=None if tenant_slug is None else [tenant_slug]
+                )
+            except NotFoundError as exc:
+                # A slug that matches nothing is a caller error, not a clean bill
+                # of health: exiting 0 here would hand cron a false green light.
+                console.print(f"[red]{exc}[/red]")
+                raise typer.Exit(code=1) from exc
+            # Assignment and every use of `report` live in the same block on
+            # purpose. Printing it after the `finally` made correctness depend on
+            # the `except` above always exiting — an implicit precondition that
+            # would have surfaced as a NameError the day someone softened that
+            # branch into a warning.
+            console.print(render_report(report))
+            if strict and report.needs_attention:
+                raise typer.Exit(code=1)
+    finally:
+        gateway.close()
 
 
 @app.command()

@@ -79,6 +79,9 @@ class BlockingGateway:
     def chat(self, **kwargs: Any) -> dict[str, Any]:
         return {"response": "ok"}
 
+    def list_document_filenames(self, **kwargs: Any) -> list[str]:
+        return []
+
     def delete_document(self, **kwargs: Any) -> dict[str, Any]:
         return {"success": True, "deleted_chunks": 0}
 

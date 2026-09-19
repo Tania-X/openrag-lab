@@ -313,12 +313,21 @@ false   远端超时/连接中断。文档仍算删除成功(它已经不在调�
 **被拒绝之后怎么重试**：远端明确拒绝（502）时，行停在 `deleting` 并记下原因，
 此时再次调用本接口仍然是 **409** —— 名字处于"忙"状态。重试是**对账**的职责，不挂回请求路径
 （同 §2.7 的墓碑 404：把重试挂回请求路径，等于让一个死掉的请求成为唯一的修复机会）。
-运维可以这样查卡住的行（原因就写在 `status_reason`，不进 API 响应）：
+运维要看卡住的行，用只读的对账报告（原因在 `status_reason` 里，不进 API 响应）：
 
-```sql
-SELECT stored_filename, status, status_reason, updated_at
-FROM documents WHERE status IN ('indexing', 'deleting') OR remote_outcome_unknown;
+```bash
+uv run openrag-lab reconcile            # 本地待办 + 幽灵 + 远端缺失
+uv run openrag-lab reconcile --strict   # 有待办时退出码 1（给 cron 用）
 ```
+
+它同时报告远端读不到的租户 —— **读不到不等于没有**，那些租户会被排除在比对之外
+（OpenRAG 的列表接口最多返回 500 条且不告知是否截断：**读到了也不等于读全了**，
+命中上限时按"读不到"处理，而不是拿半份名单去比对）；
+配置缺失（没配 `OPENRAG_API_KEY`）单独成一类，标为配置问题而不是远端故障。
+
+`--tenant` 写了不存在的 slug 时**直接报错、退出码 1**，而不是给一份空报告：
+空报告与健康报告长得一模一样（"nothing needs attention" + 退出码 0），而这个命令是给
+cron 用的 —— 打错一个字母不能变成一次绿灯。
 
 ---
 

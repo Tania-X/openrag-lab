@@ -93,6 +93,21 @@ class RagGateway(Protocol):
         """
         ...
 
+    def list_document_filenames(self, *, api_key: str) -> list[str]:
+        """Every filename OpenRAG currently stores for this key.
+
+        Used by reconciliation to compare the two sides in one call instead of
+        probing name by name. Read-only by contract — the report stage must not
+        be able to mutate anything through this method.
+
+        **All of them, or an error — never a partial list.** Callers diff this
+        against a set, and a set difference turns truncation into confident
+        nonsense: every name that fell off the end reads as "registered but not
+        remote". An incomplete read is therefore reported as a failure, not
+        returned.
+        """
+        ...
+
     def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
         """Return the id OpenRAG assigned to ``stored_filename``, if known.
 

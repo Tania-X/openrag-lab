@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openrag_lab.client import OpenRAGClient, OpenRAGError
+from openrag_lab.client import LIST_FILES_MAX, OpenRAGClient, OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
 
@@ -208,18 +208,23 @@ class OpenRAGGateway:
 
         The address is passed explicitly rather than left to the client's own
         defaulting, so the gateway always targets the configured OpenRAG
-        instance even if that defaulting changes. The ingestion timeout is set
-        here too: it decides how long a request thread can be held.
+        instance even if that defaulting changes. Both timeouts are set here too:
+        the ingest one decides how long a request thread can be held, and the
+        per-request one is what reconciliation derives its "stuck" threshold
+        from — a budget nothing can configure is a budget nobody can reason about.
         """
         settings = get_settings()
         base_url = self._base_url or settings.openrag_base_url
-        timeout = (
+        ingest_timeout = (
             self._ingest_timeout
             if self._ingest_timeout is not None
             else settings.upload_ingest_timeout_seconds
         )
         return self._client_factory(
-            base_url=base_url, api_key=api_key, ingest_timeout=timeout
+            base_url=base_url,
+            api_key=api_key,
+            timeout=settings.openrag_request_timeout_seconds,
+            ingest_timeout=ingest_timeout,
         )
 
     def close(self) -> None:
@@ -324,6 +329,32 @@ class OpenRAGGateway:
                 "deleted_chunks": int(payload.get("deleted_chunks") or 0),
                 "already_absent": False,
             }
+
+    def list_document_filenames(self, *, api_key: str) -> list[str]:
+        """Every stored filename, or an error — see the port contract.
+
+        OpenRAG's listing endpoint stops at ``LIST_FILES_MAX`` and says nothing
+        about whether it stopped early, so a full page is treated as *possibly
+        truncated* rather than trusted. Reconciliation compares this list as a
+        set: a name missing because of paging would be reported as "registered,
+        not remote", i.e. a truncation would turn into a screen of false alarms
+        on a command built for cron. "Unreadable" is the honest answer here.
+        """
+        with self._borrow(api_key) as client:
+            entries = client.list_files()
+            if len(entries) >= LIST_FILES_MAX:
+                raise OpenRAGError(
+                    f"OpenRAG listing returned {len(entries)} entries, at its "
+                    f"{LIST_FILES_MAX}-entry ceiling: the list may be truncated, "
+                    "so it cannot be compared against the registry. This tenant "
+                    "stays unreadable until the listing can be paged or the "
+                    "library shrinks — retrying will not change it."
+                )
+            return [
+                str(entry["filename"])
+                for entry in entries
+                if entry.get("filename")
+            ]
 
     def find_document_id(self, *, api_key: str, stored_filename: str) -> str | None:
         with self._borrow(api_key) as client:
