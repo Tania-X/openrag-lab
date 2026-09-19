@@ -169,7 +169,11 @@ async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
             # the `except` above always exiting — an implicit precondition that
             # would have surfaced as a NameError the day someone softened that
             # branch into a warning.
-            console.print(render_report(report))
+            # markup=False: the report is plain text, and Rich would otherwise
+            # read the `[category]` labels as style tags and silently drop them —
+            # the operator's copy lost the one word that says what kind of
+            # problem each row is.
+            console.print(render_report(report), markup=False)
             if strict and report.needs_attention:
                 raise typer.Exit(code=1)
     finally:

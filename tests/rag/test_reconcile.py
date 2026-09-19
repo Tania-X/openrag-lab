@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
+from typer.testing import CliRunner
 
 from openrag_lab.application.rag.reconcile import (
     CATEGORY_FAILED,
@@ -33,6 +34,7 @@ from openrag_lab.application.rag.reconcile import (
     compare_remote,
     render_report,
 )
+from openrag_lab.cli import app
 from openrag_lab.client import OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.identity.models import Document, Tenant, User
@@ -46,6 +48,7 @@ from openrag_lab.infrastructure.db.repositories.identity import (
     SqlTenantRepository,
     SqlUserRepository,
 )
+from openrag_lab.infrastructure.db.seed import seed_identity
 
 NOW = datetime(2026, 9, 19, 12, 0, tzinfo=UTC)
 RULES = StalenessRules(indexing_seconds=600.0, deleting_seconds=120.0)
@@ -285,7 +288,10 @@ def test_the_render_shows_thresholds_counts_and_actions() -> None:
         )
     )
     assert "indexing > 10m" in text and "deleting > 2m" in text
-    assert "[stuck-upload] acme acme/slow.md" in text and "age=15.0m" in text
+    # 一个字段一行, 文件名单独占行: 名字是用户给的, 可能长到换行, 以前会把
+    # "age=… status=…" 挤到续行上糊成一团。
+    assert "[stuck-upload] acme/slow.md" in text
+    assert "tenant acme | age 15.0m | status indexing" in text
     assert f"next: {finding.action}" in text
     assert "ghosts (remote, unregistered): 1" in text and "acme/g.md" in text
     assert "missing (registered, not remote): 1" in text and "acme/m.md" in text
@@ -682,28 +688,36 @@ def test_every_status_and_flag_combination_has_a_defined_verdict() -> None:
 # ── CLI 层的信号: 退出码就是用户可见的结论(评审第 3 轮) ────────────────────
 
 
-def test_the_cli_exits_non_zero_for_an_unknown_tenant() -> None:
+@pytest.fixture
+def cli_database(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Point the CLI at a temp database, in a process that has no engine yet.
+
+    ``reset_db()`` is not optional: ``init_db`` now *refuses* to switch databases
+    inside one process (that refusal is the fix for a command silently reading
+    ``data/openrag-lab.db`` no matter what ``DATABASE_URL`` said), so each test
+    that drives the CLI has to start from an unbound process — exactly like a
+    real invocation does.
+    """
+    from openrag_lab.infrastructure.db.session import reset_db
+
+    monkeypatch.setattr(
+        get_settings(), "database_url", f"sqlite+aiosqlite:///{tmp_path / 'cli.db'}"
+    )
+    reset_db()
+    try:
+        yield tmp_path / "cli.db"
+    finally:
+        reset_db()
+
+
+def test_the_cli_exits_non_zero_for_an_unknown_tenant(cli_database) -> None:
     """这个 bug 的用户可见形态就在退出码上 —— 所以在这里再钉一次。
 
     真实调用(临时库、真 CLI 入口、不碰网络): `--tenant typo` 必须非零退出,
     且**不能**出现"nothing needs attention"。前者是 cron 唯一能看到的信号, 后者是
     它最不能看到的一句话。
     """
-    import tempfile
-    from pathlib import Path
-
-    from typer.testing import CliRunner
-
-    from openrag_lab.cli import app
-
-    with tempfile.TemporaryDirectory() as tmp:
-        database = Path(tmp) / "cli.db"
-        previous = get_settings().database_url
-        object.__setattr__(get_settings(), "database_url", f"sqlite+aiosqlite:///{database}")
-        try:
-            result = CliRunner().invoke(app, ["reconcile", "--tenant", "typo"])
-        finally:
-            object.__setattr__(get_settings(), "database_url", previous)
+    result = CliRunner().invoke(app, ["reconcile", "--tenant", "typo"])
 
     assert result.exit_code == 1, result.output
     assert "typo" in result.output
@@ -742,7 +756,7 @@ async def test_a_truncated_remote_listing_becomes_unreadable_not_a_screen_of_mis
     assert report.needs_attention is True
 
 
-def test_the_cli_refuses_an_explicitly_empty_tenant() -> None:
+def test_the_cli_refuses_an_explicitly_empty_tenant(cli_database) -> None:
     """`--tenant ""` 必须与 `--tenant typo` 一样被拒绝, 不能被悄悄放宽成全量。
 
     修复前: 空字符串 falsy → CLI 把过滤构造成 None → 走"遍历全部租户"分支 ——
@@ -750,23 +764,7 @@ def test_the_cli_refuses_an_explicitly_empty_tenant() -> None:
     服务层, 没测接线"的经典空转: `test_an_empty_filter_is_refused` 直接调服务层,
     碰不到 CLI 的短路。
     """
-    import tempfile
-    from pathlib import Path
-
-    from typer.testing import CliRunner
-
-    from openrag_lab.cli import app
-
-    with tempfile.TemporaryDirectory() as tmp:
-        previous = get_settings().database_url
-        object.__setattr__(
-            get_settings(), "database_url",
-            f"sqlite+aiosqlite:///{Path(tmp) / 'cli-empty.db'}",
-        )
-        try:
-            result = CliRunner().invoke(app, ["reconcile", "--tenant", ""])
-        finally:
-            object.__setattr__(get_settings(), "database_url", previous)
+    result = CliRunner().invoke(app, ["reconcile", "--tenant", ""])
 
     assert result.exit_code == 1, result.output
     assert "nothing needs attention" not in result.output, "空值不能变成一次全量绿灯"
@@ -774,3 +772,196 @@ def test_the_cli_refuses_an_explicitly_empty_tenant() -> None:
         f"应是有意的 typer.Exit, 实际 {type(result.exception).__name__}"
     )
     assert "Traceback" not in result.output
+
+
+# ── 脏库演练: 操作员**看到的那一份**(演练的产物) ─────────────────────────
+# 这一节存在的理由: 上面的单测断言的是 `render_report()` 返回的字符串, 而操作员看到的
+# 是 CLI 打印出来的那一份 —— 两者并不相同。第一次人眼演练就发现 Rich 把 `[category]`
+# 当样式标签吃掉了: 单测全绿, 而真实输出里**一个分类标签都没有**。
+
+
+class _DrillGateway:
+    """Stands in for the gateway: one ghost, no network, no mutations."""
+
+    def __init__(self, *, remote: list[str] | None = None, fail: bool = False) -> None:
+        self._remote = remote or []
+        self._fail = fail
+        self.closed = False
+
+    def list_document_filenames(self, *, api_key: str) -> list[str]:
+        if self._fail:
+            raise OpenRAGError("OpenRAG listing returned 500 entries, at its 500-entry ceiling")
+        return list(self._remote)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _seed_drill_rows(factory) -> None:
+    """Every category, plus the three controls that must stay silent."""
+    import asyncio
+
+    from openrag_lab.domain.identity.models import Document, Tenant, User
+    from openrag_lab.infrastructure.db.repositories.identity import (
+        SqlDocumentRepository,
+        SqlTenantRepository,
+        SqlUserRepository,
+    )
+
+    async def seed() -> None:
+        async with factory() as session:
+            await seed_identity(session)
+            await SqlTenantRepository(session).save(
+                Tenant(id=TenantId("t-acme"), name="Acme", slug="acme")
+            )
+            await SqlUserRepository(session).save(
+                User(id=UserId("u-alice"), tenant_id=TenantId("t-acme"), username="alice", password_hash="h")
+            )
+            repository = SqlDocumentRepository(session)
+            rows = [
+                # 出现的
+                ("stuck-upload.md", DocumentStatus.INDEXING, 3 * 3600, None, False),
+                ("stuck-delete.md", DocumentStatus.DELETING, 900, None, False),
+                ("failed.md", DocumentStatus.FAILED, 7200, "boom", False),
+                ("failed-unknown.md", DocumentStatus.FAILED, 1800, "timeout", True),
+                ("tombstone-unknown.md", DocumentStatus.DELETED, 400, "timeout", True),
+                ("contradiction.md", DocumentStatus.INDEXED, 60, "stale flag", True),
+                # 一条以"天"为单位的行: 年龄格式化必须真的进位(演练发现
+                # 400 天的行被印成 "9600.0h")
+                ("ancient.md", DocumentStatus.FAILED, 400 * 86400, "boom", False),
+                # 对照组: 必须沉默
+                ("in-flight.md", DocumentStatus.INDEXING, 30, None, False),
+                ("tombstone-ok.md", DocumentStatus.DELETED, 400, "removed 7 chunk(s)", False),
+                ("healthy.md", DocumentStatus.INDEXED, 60, None, False),
+            ]
+            for index, (name, status, age, reason, unknown) in enumerate(rows):
+                document = Document(
+                    id=DocumentId(f"d{index}"), tenant_id=TenantId("t-acme"),
+                    stored_filename=f"acme/{name}", display_name=name,
+                    uploaded_by=UserId("u-alice"), status=status,
+                    status_reason=reason, remote_outcome_unknown=unknown,
+                )
+                document.updated_at = datetime.now(UTC) - timedelta(seconds=age)
+                await repository.save(document)
+            await session.commit()
+
+    asyncio.run(seed())
+
+
+def _run_cli(monkeypatch, cli_database, gateway: _DrillGateway, *args: str):
+    """Invoke the CLI with the gateway replaced and the schema seeded.
+
+    `reset_db` + an explicit `create_all()` first: the engine is bound strictly
+    now, so the test has to set the database up the same way a real run does.
+    """
+    import asyncio
+
+    from openrag_lab.infrastructure.db import session as db_session
+    from openrag_lab.infrastructure.openrag import openrag_port_impl
+
+    db_session.reset_db()
+    asyncio.run(db_session.create_all())
+    factory = async_sessionmaker(db_session._engine, expire_on_commit=False)
+    _seed_drill_rows(factory)
+
+    # The CLI imports OpenRAGGateway inside `_reconcile`, so patching the module
+    # attribute is the seam that works without a live OpenRAG.
+    monkeypatch.setattr(openrag_port_impl, "OpenRAGGateway", lambda **_: gateway)
+    return CliRunner().invoke(app, ["reconcile", *args])
+
+
+def test_the_operator_facing_report_shows_every_category(cli_database, monkeypatch) -> None:
+    """演练的核心断言: **操作员看到的**那份里, 六个分类标签都在。
+
+    Rich 会把 `[failed]` 当样式标签吃掉 —— 单测断言 `render_report()` 的返回值,
+    永远发现不了这件事。所以这里断言 CLI 的实际输出。
+    """
+    result = _run_cli(
+        monkeypatch,
+        cli_database,
+        # 远端要包含健康行: 否则它会(正确地)被报成 missing, 对照组就失去意义了。
+        _DrillGateway(remote=["acme/ghost.md", "acme/healthy.md"]),
+    )
+
+    assert result.exit_code == 0, result.output
+    for label in (
+        "[stuck-upload]",
+        "[stuck-delete]",
+        "[failed]",
+        "[unconfirmed-delete]",
+        "[inconsistent]",
+    ):
+        assert label in result.output, f"分类标签 {label} 没出现在操作员看到的输出里"
+    # 对照组必须沉默: 在途上传 / 已确认墓碑 / 健康行
+    assert "in-flight.md" not in result.output
+    assert "tombstone-ok.md" not in result.output
+    assert "healthy.md" not in result.output
+    # 长度可读: 年龄用天/小时/分钟, 不是"9600.0h"
+    assert "age 3.0h" in result.output
+    assert "age 400.0d" in result.output, "以天为单位的老行不能被印成 9600.0h"
+    assert "tenant acme | age" in result.output
+    # 远端那一半: 幽灵报出来, 且它属于 acme 命名空间
+    assert "ghosts (remote, unregistered): 1" in result.output
+    assert "acme/ghost.md" in result.output
+    assert "unsettled rows: 7" in result.output
+
+
+def test_the_operator_facing_report_is_strict_about_a_dirty_registry(
+    cli_database, monkeypatch
+) -> None:
+    """脏库 + --strict → 退出码 1(这是 cron 唯一能看到的信号)。"""
+    result = _run_cli(monkeypatch, cli_database, _DrillGateway(), "--strict")
+    assert result.exit_code == 1, result.output
+    assert "nothing needs attention" not in result.output
+
+
+def test_a_clean_registry_reports_clean_and_exits_zero(cli_database, monkeypatch) -> None:
+    """反向守卫: 干净库必须真的安静(否则告警会被无视)。"""
+    import asyncio
+
+    from openrag_lab.infrastructure.db import session as db_session
+    from openrag_lab.infrastructure.openrag import openrag_port_impl
+
+    db_session.reset_db()
+    asyncio.run(db_session.create_all())
+    factory = async_sessionmaker(db_session._engine, expire_on_commit=False)
+
+    async def seed_tenant() -> None:
+        async with factory() as session:
+            await seed_identity(session)
+            await SqlTenantRepository(session).save(
+                Tenant(id=TenantId("t-acme"), name="Acme", slug="acme")
+            )
+            await SqlUserRepository(session).save(
+                User(id=UserId("u-alice"), tenant_id=TenantId("t-acme"), username="alice", password_hash="h")
+            )
+            await session.commit()
+
+    asyncio.run(seed_tenant())
+    monkeypatch.setattr(openrag_port_impl, "OpenRAGGateway", lambda **_: _DrillGateway())
+    result = CliRunner().invoke(app, ["reconcile", "--strict"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing needs attention" in result.output
+
+
+def _flat(text: str) -> str:
+    """Collapse whitespace: Rich wraps at the terminal width and splits words.
+
+    Asserting a long phrase against the raw output is a coin flip — the real run
+    printed "an unreadable \nremote is not an empty one". Normalise first.
+    """
+    return " ".join(text.split())
+
+
+def test_the_operator_facing_report_names_the_unreadable_remote(
+    cli_database, monkeypatch
+) -> None:
+    """远端读不到时: 本地那一半照常, 且明确写"读不到不等于没有"。"""
+    result = _run_cli(monkeypatch, cli_database, _DrillGateway(fail=True))
+    flat = _flat(result.output)
+
+    assert "[stuck-upload]" in flat, "本地那一半不能因为远端挂了就消失"
+    assert "could not be read: 1" in flat
+    assert "an unreadable remote is not an empty one" in flat
+    assert "ceiling" in flat, "失败原因要原样带出来(这里含上限提示)"
