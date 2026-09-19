@@ -861,6 +861,8 @@ async def test_a_refused_delete_leaves_the_row_deleting_and_answers_502() -> Non
     assert row is not None
     assert row.status is DocumentStatus.DELETING, "删除失败不能回退成 INDEXED(那是撒谎)"
     assert row.remote_outcome_unknown is False, "500 是明确的拒绝, 不是未知"
+    # 卡住的行必须说明为什么卡住(与 FAILED 路径对称), 否则运维只能去翻日志
+    assert row.status_reason is not None and "boom" in row.status_reason
 
 
 async def test_a_tombstone_is_not_found_and_is_not_deleted_again() -> None:
@@ -1003,3 +1005,39 @@ async def test_a_replacement_upload_keeps_the_id_when_the_task_echoes_none() -> 
 
     assert response.status_code == 201
     assert response.json()["openrag_document_id"] == "orag-still-valid"
+
+
+async def test_a_refused_delete_stays_busy_for_the_api_and_is_left_to_reconciliation() -> None:
+    """被拒绝 → 行停 DELETING **且带原因**; 而 API 上的重试仍然是 409。
+
+    这不是遗漏, 是已经拍过的原则: 重试是 P3 对账的职责, 不挂回请求路径 ——
+    "把重试挂回请求路径, 等于让一个死掉的请求成为唯一的修复机会"(墓碑 404 那条决策)。
+    代价写进了设计稿 §10.2: P3 的重试入口必须能作用于 DELETING 行。
+
+    这条测试同时钉住两件事: 拒绝留下可发现的痕迹, 以及**状态没有移动**。
+    """
+    registry: dict[str, Any] = {}
+    async with _build_client(
+        actor=ACME_TENANT,
+        documents_seed=[("t-acme", "report.md")],
+        tenant_role="developer",
+        registry=registry,
+    ) as (client, gateway):
+        gateway.error = OpenRAGError("upstream 500", status_code=500)
+        refused = await client.delete("/api/documents/report.md")
+
+        async with registry["session_factory"]() as session:
+            stuck = await SqlDocumentRepository(session).find_by_stored_filename(
+                TenantId("t-acme"), "acme/report.md"
+            )
+        assert stuck is not None and stuck.status is DocumentStatus.DELETING
+        assert stuck.status_reason is not None and "upstream 500" in stuck.status_reason
+
+        # 再删一次: 名字仍然"忙"(DELETING) → 409。重试入口留给 P3 对账。
+        gateway.error = None
+        retried = await client.delete("/api/documents/report.md")
+
+    assert refused.status_code == 502
+    assert retried.status_code == 409
+    assert "deleting" in retried.json()["detail"]
+    assert gateway.deleted == [], "409 要在调 OpenRAG 之前就挡住"

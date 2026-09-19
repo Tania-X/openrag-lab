@@ -373,6 +373,23 @@ class Document:
         self.openrag_document_id = None
         self.updated_at = datetime.now(UTC)
 
+    def note_delete_failure(self, reason: str) -> None:
+        """Record why a delete is still stuck, without leaving ``DELETING``.
+
+        A refusal (OpenRAG answered and said no) keeps the row in ``DELETING`` so
+        reconciliation can retry it — but "stuck with no explanation" is not a
+        state an operator can act on, and the upload path already records its
+        reasons. The state itself must not move: recording a failure is not
+        progress, and pretending otherwise would hide the retry that is owed.
+        """
+        if self.status is not DocumentStatus.DELETING:
+            raise InvalidOperationError(
+                f"Document is not being deleted (status={self.status.value}): "
+                f"{self.display_name}"
+            )
+        self.status_reason = reason[:MAX_STATUS_REASON_LENGTH]
+        self.updated_at = datetime.now(UTC)
+
     def mark_deleted(self, *, confirmed: bool, detail: str) -> None:
         """Conclude the removal and keep the row as a tombstone.
 

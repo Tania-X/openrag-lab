@@ -250,6 +250,11 @@ openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]
   "删除一个其实还在写远端的上传"这种跨进程时序，方向安全（检索不到，且列表可见），
   由 P3 收敛。
 - 墓碑只增不减：没有保留期/清理策略（数量等于历史删除数）。等 P3 上线后按需加保留窗口。
+- **被拒绝的删除无法通过 API 重试**：行停在 `DELETING` 后，再调删除接口是 409（"名字忙"）。
+  这是刻意的（重试归 P3，见决策 11），但给 P3 留了一个必须解决的问题：
+  **它的重试入口要能作用于 `DELETING` 行**（服务层的 `mark_deleting()` 会拒绝
+  `DELETING`），否则对账拿不到能重试的路径。`status_reason` 已经在拒绝时写好，
+  P3 可以直接用它区分"拒绝过"与"可能仍在途"。
 - 阈值（P3 用）：`INDEXING` 的建议 stale 阈值是 `2 × UPLOAD_INGEST_TIMEOUT_SECONDS`
   （默认 600s；系数 2 覆盖"限流排队 + 一次完整入库等待"），`DELETING` 是
   `2 × client.timeout`（默认 120s）。**现在不写成配置项** —— 没有任何代码读它的配置

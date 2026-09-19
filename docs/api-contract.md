@@ -310,6 +310,16 @@ false   远端超时/连接中断。文档仍算删除成功(它已经不在调�
 把 `confirmed` 报出来是刻意的：一句光秃秃的"已删除"会让一个猜测冒充事实，
 而调用方有权知道这次删除是否已经落定。
 
+**被拒绝之后怎么重试**：远端明确拒绝（502）时，行停在 `deleting` 并记下原因，
+此时再次调用本接口仍然是 **409** —— 名字处于"忙"状态。重试是**对账**的职责，不挂回请求路径
+（同 §2.7 的墓碑 404：把重试挂回请求路径，等于让一个死掉的请求成为唯一的修复机会）。
+运维可以这样查卡住的行（原因就写在 `status_reason`，不进 API 响应）：
+
+```sql
+SELECT stored_filename, status, status_reason, updated_at
+FROM documents WHERE status IN ('indexing', 'deleting') OR remote_outcome_unknown;
+```
+
 ---
 
 ## 3. OpenRAG Lab 后端 ↔ OpenRAG 服务

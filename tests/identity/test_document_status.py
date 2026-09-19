@@ -252,3 +252,33 @@ def test_a_replacement_upload_still_keeps_the_id() -> None:
 
     document.mark_indexed(None)  # 任务没回传 id
     assert document.openrag_document_id == "orag-old"
+
+
+def test_a_refused_delete_records_why_without_moving_the_state() -> None:
+    """被拒绝的删除要落痕, 但状态不许动 —— 记下失败不是进展。
+
+    停在 DELETING 才是对的(对账欠一次重试), 所以这里只写原因、不改状态。
+    """
+    document = _document(status=DocumentStatus.DELETING)
+    document.note_delete_failure("OpenRAGError: boom (500)")
+
+    assert document.status is DocumentStatus.DELETING
+    assert document.status_reason == "OpenRAGError: boom (500)"
+
+
+@pytest.mark.parametrize(
+    "start",
+    [DocumentStatus.INDEXED, DocumentStatus.INDEXING, DocumentStatus.FAILED, DocumentStatus.DELETED],
+)
+def test_only_a_deleting_row_can_record_a_delete_failure(start: DocumentStatus) -> None:
+    """别的状态没有"删除被拒"这回事 —— 允许写就是给它们塞一句假话。"""
+    document = _document(status=start)
+    with pytest.raises(InvalidOperationError):
+        document.note_delete_failure("nope")
+
+
+def test_a_delete_failure_reason_is_bounded() -> None:
+    document = _document(status=DocumentStatus.DELETING)
+    document.note_delete_failure("x" * (MAX_STATUS_REASON_LENGTH + 50))
+    assert document.status_reason is not None
+    assert len(document.status_reason) == MAX_STATUS_REASON_LENGTH

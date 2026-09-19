@@ -327,11 +327,17 @@ class DocumentService:
                 "deleted_chunks": 0,
                 "confirmed": False,
             }
-        # Anything else is a real refusal (OpenRAG answered and said no): nothing
-        # was removed, the row stays DELETING — a non-terminal state, so the
-        # failed delete is discoverable and retryable rather than abandoned. No
-        # handler is needed for that: letting the error out is what keeps the row
-        # where it is.
+        except Exception as exc:
+            # A real refusal (OpenRAG answered and said no): nothing was removed.
+            # The row stays DELETING — a non-terminal state, so the delete is
+            # discoverable and retryable — and it records *why* it is stuck, the
+            # same way a failed upload does. Then the error keeps going: the
+            # caller still gets its 502, and the state does not move (recording a
+            # failure is not progress, and pretending otherwise would hide the
+            # retry that reconciliation owes).
+            await self._note_delete_failure(document, tenant, stored_filename, exc)
+            raise
+
         chunks = int(result.get("deleted_chunks") or 0)
         detail = (
             "OpenRAG had no chunks for this name"
@@ -351,6 +357,33 @@ class DocumentService:
             "deleted_chunks": chunks,
             "confirmed": True,
         }
+
+    async def _note_delete_failure(
+        self,
+        document: Document,
+        tenant: Tenant,
+        stored_filename: str,
+        exc: BaseException,
+    ) -> None:
+        """Record a refused delete on the row, without masking the refusal.
+
+        If even this write fails, the row stays ``DELETING`` with no reason —
+        still a non-terminal, discoverable state, so the retry is not lost.
+        """
+        document.note_delete_failure(f"{type(exc).__name__}: {exc}")
+        try:
+            await self._commit_registry(
+                action="delete-refused",
+                tenant_label=tenant.slug,
+                stored_filename=stored_filename,
+                save=lambda: self._documents.save(document),
+            )
+        except Exception:  # noqa: BLE001 - the original refusal must win
+            logger.exception(
+                "Could not record the delete refusal for %s; the row stays "
+                "DELETING and reconciliation can still retry it",
+                stored_filename,
+            )
 
     async def _mark_deleted(
         self,
