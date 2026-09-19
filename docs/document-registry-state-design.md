@@ -160,6 +160,9 @@ D 这条是我在做阶段 0 的并发测试时撞出来的，说明**幂等约�
 3. **远端读不到时降级**：按租户 try/except，失败的租户记进报告并**排除在比对之外**
    （读不到 ≠ 没有；否则一次超时会把整个租户的健康文档报成 missing）。
    本地那一半不需要网络，照常输出 —— 这个命令最需要能跑的时刻，恰恰是远端出问题的时候。
+   但**"配置缺失"要单独成一类**：`resolve_tenant_scope` 的 `ConfigurationError` 自述是
+   deployment error，混进"远端读不到"会让运维把"没配 key"读成"OpenRAG 挂了"（两者要去的
+   地方完全不同）。配置错误还会**停止遍历**：所有租户只会以同样方式失败，报一次就够。
 
 ```text
 openrag-lab documents reconcile [--tenant <slug>] [--fix] [--age-minutes 30]

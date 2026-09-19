@@ -29,6 +29,7 @@ from typing import Any
 
 from anyio import to_thread
 
+from openrag_lab.config import ConfigurationError
 from openrag_lab.domain.identity.models import Document
 from openrag_lab.domain.shared.enums import DocumentStatus
 
@@ -142,6 +143,12 @@ class ReconcileReport:
     remote: RemoteComparison
     rules: StalenessRules
     remote_errors: list[RemoteUnavailable] = field(default_factory=list)
+    #: A deployment problem, not a remote failure. Kept apart because the two
+    #: send an operator to completely different places: a missing API key is
+    #: fixed in this deployment's configuration, while an unreachable OpenRAG is
+    #: fixed on OpenRAG's side. Folding the first into the second is how
+    #: "misconfigured" gets misread as "the service is down".
+    configuration_problem: str | None = None
 
     @property
     def needs_attention(self) -> bool:
@@ -152,6 +159,7 @@ class ReconcileReport:
             or self.remote.missing
             or self.remote.unknown_namespace
             or self.remote_errors
+            or self.configuration_problem
         )
 
 
@@ -259,12 +267,24 @@ def _namespace_of(name: str, namespaces: dict[str, str]) -> str | None:
 def render_report(report: ReconcileReport) -> str:
     """Render the report as plain text (no Rich markup: it goes to logs/cron)."""
     rules = report.rules
-    lines = [
-        "registry reconciliation report (read-only)",
-        f"  thresholds: indexing > {_minutes(rules.indexing_seconds)}"
-        f" | deleting > {_minutes(rules.deleting_seconds)}",
-        "",
-    ]
+    lines: list[str] = ["registry reconciliation report (read-only)"]
+    if report.configuration_problem:
+        # First, and labelled as configuration: this is not "OpenRAG is down".
+        lines.append(
+            f"! configuration problem, not a remote failure: "
+            f"{report.configuration_problem}"
+        )
+        lines.append(
+            "  (no tenant's remote side could be read; the local half below is"
+            " unaffected)"
+        )
+    lines.extend(
+        [
+            f"  thresholds: indexing > {_minutes(rules.indexing_seconds)}"
+            f" | deleting > {_minutes(rules.deleting_seconds)}",
+            "",
+        ]
+    )
     lines.append(f"unsettled rows: {len(report.findings)}")
     for finding in report.findings:
         flag = " [remote outcome unknown]" if finding.remote_outcome_unknown else ""
@@ -363,6 +383,7 @@ class ReconcileService:
         indexed: set[str] = set()
         remote: list[str] = []
         remote_errors: list[RemoteUnavailable] = []
+        configuration_problem: str | None = None
         for tenant in tenants:
             rows = await documents.list_unsettled(tenant.id)
             findings.extend(
@@ -377,6 +398,13 @@ class ReconcileService:
                 tenant_remote = await self._list_remote(
                     resolve_tenant_scope(tenant).api_key
                 )
+            except ConfigurationError as exc:
+                # A deployment error, in the words of resolve_tenant_scope — and
+                # it fails identically for every tenant, so the walk stops here
+                # rather than printing the same line once per tenant.
+                logger.warning("Reconciliation cannot read the remote side: %s", exc)
+                configuration_problem = str(exc)
+                break
             except Exception as exc:  # noqa: BLE001 - the report must survive this
                 logger.warning("Remote listing failed for tenant %s: %s", tenant.slug, exc)
                 remote_errors.append(
@@ -400,4 +428,5 @@ class ReconcileService:
             ),
             rules=self._rules,
             remote_errors=remote_errors,
+            configuration_problem=configuration_problem,
         )

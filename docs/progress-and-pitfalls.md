@@ -609,6 +609,12 @@ mark_deleting: INDEXING/DELETING/DELETED → 冲突   （删除撞在途上传 /
    等于把一次超时变成一屏假警报。现在本地那一半照常输出，报告里明确写
    "读不到的租户已排除：**读不到不等于没有**"。
 
+   评审第 1 轮又补了一刀，同一条推理仍然成立：**"配置缺失"必须与"远端故障"分开报**。
+   `resolve_tenant_scope` 的 `ConfigurationError` 自述是 deployment error，被吞进
+   `RemoteUnavailable` 就等于把"没配 key"说成"OpenRAG 挂了"——两者要去的地方完全不同。
+   现在它单独成一类、出现在报告最上面，并且**遇到就停止遍历**（所有租户只会同样失败，
+   报一次就够）。
+
 ### 实测与回归
 
 - 263 个测试通过；ruff / mypy(94 文件) 干净；

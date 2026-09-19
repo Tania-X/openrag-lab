@@ -144,7 +144,8 @@ async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
         request_timeout_seconds=settings.openrag_request_timeout_seconds,
     )
     gateway = OpenRAGGateway(
-        ingest_timeout=settings.upload_ingest_timeout_seconds
+        base_url=settings.openrag_base_url,
+        ingest_timeout=settings.upload_ingest_timeout_seconds,
     )
     try:
         async with asynccontextmanager(get_session)() as session:

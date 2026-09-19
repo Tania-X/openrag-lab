@@ -492,3 +492,71 @@ async def test_repository_query_selects_exactly_the_unsettled_rows(registry) -> 
     # 已确认的墓碑不该进待办, 但它仍然算"我们知道的名字"
     assert "gone.md" not in {row.display_name for row in rows}
     assert "acme/gone.md" in all_names
+
+
+# ── 配置缺失 ≠ 远端故障(评审第 1 轮 issue ①) ──────────────────────────────
+
+
+async def test_a_missing_api_key_is_reported_as_configuration_not_as_a_remote_failure(
+    registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`resolve_tenant_scope` 自己说这是 deployment error, 不是租户级失败。
+
+    混进 `remote_errors` 会让运维把"没配 key"读成"OpenRAG 挂了" —— 两者要去的地方
+    完全不同(一个改本部署的配置, 一个去 OpenRAG 那边查)。
+    """
+    monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
+    async with registry() as session:
+        await SqlDocumentRepository(session).save(
+            _document("bad.md", DocumentStatus.FAILED, reason="boom")
+        )
+        await session.commit()
+
+    gateway = FakeGateway()
+    async with registry() as session:
+        report = await ReconcileService(session, gateway, rules=RULES).run()
+
+    assert report.configuration_problem == "OPENRAG_API_KEY is not configured"
+    assert report.remote_errors == []
+    assert gateway.listed == [], "key 都没有, 不该发出任何远端调用"
+    assert [f.stored_filename for f in report.findings] == ["acme/bad.md"], "本地那一半照常"
+    assert report.needs_attention is True
+
+    text = render_report(report)
+    assert "configuration problem, not a remote failure" in text
+    assert "the local half below is unaffected" in text
+    assert "could not be read: 1" not in text, "不能同时报成租户级远端失败"
+
+
+async def test_a_configuration_problem_stops_the_walk_instead_of_repeating_itself(
+    registry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """所有租户都会以同样方式失败 —— 报一次就停, 不要每个租户刷一行。"""
+    monkeypatch.setattr(get_settings(), "openrag_api_key", "", raising=False)
+    async with registry() as session:
+        await SqlTenantRepository(session).save(
+            Tenant(id=TenantId("t-globex"), name="Globex", slug="globex")
+        )
+        await session.commit()
+
+    gateway = FakeGateway()
+    async with registry() as session:
+        report = await ReconcileService(session, gateway, rules=RULES).run()
+
+    assert report.configuration_problem is not None
+    assert gateway.listed == []
+
+
+async def test_a_real_remote_failure_is_still_a_tenant_level_error(registry) -> None:
+    """反向守卫: 真·远端故障必须留在 remote_errors 里, 不能被提升成配置问题。"""
+    async with registry() as session:
+        await SqlDocumentRepository(session).save(_document("ok.md", DocumentStatus.INDEXED))
+        await session.commit()
+
+    gateway = FakeGateway()
+    gateway.fail_with = TimeoutError("timeout")
+    async with registry() as session:
+        report = await ReconcileService(session, gateway, rules=RULES).run()
+
+    assert report.configuration_problem is None
+    assert [e.tenant_slug for e in report.remote_errors] == ["acme"]
