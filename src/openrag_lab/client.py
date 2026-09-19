@@ -15,6 +15,10 @@ import httpx
 
 from openrag_lab.config import get_settings
 
+#: Most files ``GET /api/v1/files/get_all`` will return. Documented by the v1
+#: endpoint ("max 500 files"); named here because callers branch on it.
+LIST_FILES_MAX = 500
+
 
 class OpenRAGError(RuntimeError):
     """Raised when OpenRAG returns an unexpected response.
@@ -210,7 +214,13 @@ class OpenRAGClient:
         return self.wait_for_task(task_id)
 
     def list_files(self) -> list[dict[str, Any]]:
-        """List all ingested files (v1 endpoint, max 500 files)."""
+        """List ingested files (v1 endpoint, capped at :data:`LIST_FILES_MAX`).
+
+        The ceiling is the endpoint's, not ours: at exactly ``LIST_FILES_MAX``
+        entries the caller cannot tell a complete listing from a truncated one,
+        so anyone comparing this list against another set has to treat it as
+        possibly incomplete (see ``OpenRAGGateway.list_document_filenames``).
+        """
         data = self._request("GET", "/api/v1/files/get_all")
         return data.get("files", [])
 

@@ -33,6 +33,7 @@ from openrag_lab.application.rag.reconcile import (
     compare_remote,
     render_report,
 )
+from openrag_lab.client import OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.identity.models import Document, Tenant, User
 from openrag_lab.domain.shared.enums import DocumentStatus
@@ -713,3 +714,29 @@ def test_the_cli_exits_non_zero_for_an_unknown_tenant() -> None:
         f"应是有意的 typer.Exit, 实际 {type(result.exception).__name__}: {result.exception}"
     )
     assert "Traceback" not in result.output
+
+
+async def test_a_truncated_remote_listing_becomes_unreadable_not_a_screen_of_missing(
+    registry,
+) -> None:
+    """评审第 5 轮(4 级): "读到了"不等于"读全了"。
+
+    网关在名单可能被截断时抛错(见 `list_document_filenames` 的契约), 服务层照旧把它
+    当成"这个租户读不到" —— 于是报告如实说读不到, 而不是把被截掉的名字全报成 missing。
+    """
+    async with registry() as session:
+        for index in range(3):
+            await SqlDocumentRepository(session).save(
+                _document(f"doc{index}.md", DocumentStatus.INDEXED)
+            )
+        await session.commit()
+
+    gateway = FakeGateway()
+    gateway.fail_with = OpenRAGError("listing hit its 500-entry ceiling")
+    async with registry() as session:
+        report = await ReconcileService(session, gateway, rules=RULES).run()
+
+    assert report.remote.missing == [], "截断绝不能变成 missing"
+    assert [e.tenant_slug for e in report.remote_errors] == ["acme"]
+    assert "ceiling" in report.remote_errors[0].detail
+    assert report.needs_attention is True

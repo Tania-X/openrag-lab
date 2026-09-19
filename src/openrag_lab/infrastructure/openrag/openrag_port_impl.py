@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from openrag_lab.client import OpenRAGClient, OpenRAGError
+from openrag_lab.client import LIST_FILES_MAX, OpenRAGClient, OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
 
@@ -331,10 +331,26 @@ class OpenRAGGateway:
             }
 
     def list_document_filenames(self, *, api_key: str) -> list[str]:
+        """Every stored filename, or an error — see the port contract.
+
+        OpenRAG's listing endpoint stops at ``LIST_FILES_MAX`` and says nothing
+        about whether it stopped early, so a full page is treated as *possibly
+        truncated* rather than trusted. Reconciliation compares this list as a
+        set: a name missing because of paging would be reported as "registered,
+        not remote", i.e. a truncation would turn into a screen of false alarms
+        on a command built for cron. "Unreadable" is the honest answer here.
+        """
         with self._borrow(api_key) as client:
+            entries = client.list_files()
+            if len(entries) >= LIST_FILES_MAX:
+                raise OpenRAGError(
+                    f"OpenRAG listing returned {len(entries)} entries, at its "
+                    f"{LIST_FILES_MAX}-entry ceiling: the list may be truncated, "
+                    "so it cannot be compared against the registry"
+                )
             return [
                 str(entry["filename"])
-                for entry in client.list_files()
+                for entry in entries
                 if entry.get("filename")
             ]
 

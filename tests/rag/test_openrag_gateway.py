@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from openrag_lab.client import OpenRAGError
+from openrag_lab.client import LIST_FILES_MAX, OpenRAGError
 from openrag_lab.config import get_settings
 from openrag_lab.domain.rag.ports import RagOutcomeUnknownError
 from openrag_lab.infrastructure.openrag.openrag_port_impl import OpenRAGGateway
@@ -551,3 +551,40 @@ def test_the_per_request_timeout_comes_from_settings(monkeypatch: pytest.MonkeyP
         gateway.close()
 
     assert FakeClient.instances[-1].timeout == 42.0
+
+
+def test_a_full_listing_page_is_refused_rather_than_trusted() -> None:
+    """远端名单命中上限时必须报错, 不能当"读到了"。
+
+    端点自己说最多返回 500 条, 且不告诉你有没有截断。对账是拿它做**集合差**的:
+    被截掉的名字会统统变成"登记了但远端没有" —— 一次分页截断变成一屏假告警,
+    而这条命令正是给 cron 用的。"读不到"比"编一份 missing"诚实。
+    """
+    FakeClient.behavior = {
+        "remote_files": [{"filename": f"acme/f{i}.md"} for i in range(LIST_FILES_MAX)]
+    }
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        with pytest.raises(OpenRAGError) as caught:
+            gateway.list_document_filenames(api_key="k")
+    finally:
+        gateway.close()
+
+    assert str(LIST_FILES_MAX) in str(caught.value)
+    assert "truncated" in str(caught.value)
+
+
+def test_a_listing_just_below_the_ceiling_is_usable() -> None:
+    """反向守卫: 差一条不算命中上限(否则 499 份文档的租户永远读不到)。"""
+    FakeClient.behavior = {
+        "remote_files": [
+            {"filename": f"acme/f{i}.md"} for i in range(LIST_FILES_MAX - 1)
+        ]
+    }
+    gateway = OpenRAGGateway(client_factory=FakeClient, base_url="http://openrag.test")
+    try:
+        names = gateway.list_document_filenames(api_key="k")
+    finally:
+        gateway.close()
+
+    assert len(names) == LIST_FILES_MAX - 1

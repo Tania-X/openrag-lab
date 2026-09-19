@@ -645,6 +645,22 @@ remote_errors、configuration_problem 全空 → `needs_attention` 为 False →
 CliRunner 同样返回 1 —— **测试照样绿**。现在额外断言"是有意的 `SystemExit` 且输出无 Traceback"。
 **只钉结果不钉原因的断言，会被崩溃冒充。**
 
+### 评审第 5 轮抓到的 4 级 bug：remote 名单被截断 → 一屏假 missing
+
+`OpenRAGClient.list_files()` 的 docstring 自己写着 "v1 endpoint, max 500 files"，而
+`list_document_filenames` 直接转发了它，`compare_remote` 又拿它做**集合差** ——
+远端超过 500 条时，被截掉的名字统统变成"registered, not remote"，报告出一屏假告警、
+`--strict` 退出码 1。**一次分页截断变成持续误报**，而这条命令是给 cron 用的。
+
+这是"读不到 ≠ 没有"的加强版：**读到了 ≠ 读全了**。修法沿用同一套机制 ——
+端口契约写成"**要么全量、要么报错，绝不返回部分列表**"，适配器命中 `LIST_FILES_MAX`
+时抛错，该租户进 `remote_errors`。500 这个数字从客户端挪到了它的事实出处处
+（`client.LIST_FILES_MAX`），适配器引用它而不是自己再写一个 500。
+
+**两个 4 级 bug 都出在"信号的真假"上，而不是"功能的成败"上**（一个把打错的 slug 变成
+绿灯，一个把截断变成红灯）。给告警系统写工具时，"说不清"和"说错"比"报错"危险得多 ——
+报错至少是诚实的。
+
 ### 一条值得记住的坑
 
 **"最长前缀优先"是多余的 —— 但那不是重点，重点是它掩盖了一条真不变量。**
