@@ -18,6 +18,7 @@ from sqlalchemy.pool import StaticPool
 
 from openrag_lab.application.rag.reconcile import (
     CATEGORY_FAILED,
+    CATEGORY_INCONSISTENT,
     CATEGORY_STUCK_DELETE,
     CATEGORY_STUCK_UPLOAD,
     CATEGORY_UNCONFIRMED_DELETE,
@@ -560,3 +561,65 @@ async def test_a_real_remote_failure_is_still_a_tenant_level_error(registry) -> 
 
     assert report.configuration_problem is None
     assert [e.tenant_slug for e in report.remote_errors] == ["acme"]
+
+
+# ── 候选超集 vs 分类: 不许有"取出来又静默丢掉"的格子(评审第 2 轮) ──────────
+
+
+def test_a_flag_that_contradicts_the_status_is_reported_not_swallowed() -> None:
+    """`INDEXED` + 没有定论 = 自相矛盾: 它声称有定论, 标记却说从没拿到定论。
+
+    当前写入路径到不了这里(`mark_indexed` 会清标记, 有测试钉着), 但"到不了"是
+    关于**现在**的断言。一旦哪天有写路径把它留下来, 报告必须自己喊出来 —— 报告存在的
+    意义就是"两边对不上就说出来", 而不是替坏掉的写路径打掩护。
+    """
+    findings = _classify([_document("weird.md", DocumentStatus.INDEXED, outcome_unknown=True)])
+    assert [f.category for f in findings] == [CATEGORY_INCONSISTENT]
+    assert "write path" in findings[0].action
+
+
+def test_the_contradiction_outranks_the_age_gate() -> None:
+    """否则"可能还在途"会变成矛盾行的藏身处: 过渡态+标记, 且年龄没超阈值。"""
+    fresh = _classify(
+        [_document("live.md", DocumentStatus.INDEXING, age_seconds=1, outcome_unknown=True)]
+    )
+    assert [f.category for f in fresh] == [CATEGORY_INCONSISTENT]
+
+    fresh_delete = _classify(
+        [_document("going.md", DocumentStatus.DELETING, age_seconds=1, outcome_unknown=True)]
+    )
+    assert [f.category for f in fresh_delete] == [CATEGORY_INCONSISTENT]
+
+
+def test_every_status_and_flag_combination_has_a_defined_verdict() -> None:
+    """把整个状态空间走一遍, 钉住"哪些格子会变成 finding"。
+
+    这条测试是查询与分类之间的耦合守卫: 查询是候选**超集**, 分类是判定。唯一允许被
+    丢掉的组合是"还在合法时限内的过渡态"(新鲜的 INDEXING/DELETING)—— 它们本来就是
+    候选而不是待办。其余每一格都必须有明确结论。
+    """
+    expected: dict[tuple[DocumentStatus, bool], str | None] = {
+        (DocumentStatus.INDEXED, False): None,
+        (DocumentStatus.INDEXED, True): CATEGORY_INCONSISTENT,
+        (DocumentStatus.INDEXING, False): None,          # 新鲜: 合法在途
+        (DocumentStatus.INDEXING, True): CATEGORY_INCONSISTENT,
+        (DocumentStatus.FAILED, False): CATEGORY_FAILED,
+        (DocumentStatus.FAILED, True): CATEGORY_FAILED,
+        (DocumentStatus.DELETING, False): None,          # 新鲜: 合法在途
+        (DocumentStatus.DELETING, True): CATEGORY_INCONSISTENT,
+        (DocumentStatus.DELETED, False): None,           # 已确认的墓碑不欠动作
+        (DocumentStatus.DELETED, True): CATEGORY_UNCONFIRMED_DELETE,
+    }
+    for (status, unknown), want in expected.items():
+        rows = [_document("x.md", status, outcome_unknown=unknown)]
+        got = [f.category for f in _classify(rows)]
+        assert got == ([want] if want else []), f"{status.value}/unknown={unknown} -> {got}"
+
+    # 过渡态超龄后必须从"候选"升级为"待办", 且分类不因标记以外的因素改变
+    aged = {
+        DocumentStatus.INDEXING: CATEGORY_STUCK_UPLOAD,
+        DocumentStatus.DELETING: CATEGORY_STUCK_DELETE,
+    }
+    for status, want in aged.items():
+        rows = [_document("x.md", status, age_seconds=100000)]
+        assert [f.category for f in _classify(rows)] == [want]

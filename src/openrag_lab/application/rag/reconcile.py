@@ -53,6 +53,7 @@ CATEGORY_STUCK_UPLOAD = "stuck-upload"
 CATEGORY_STUCK_DELETE = "stuck-delete"
 CATEGORY_FAILED = "failed"
 CATEGORY_UNCONFIRMED_DELETE = "unconfirmed-delete"
+CATEGORY_INCONSISTENT = "inconsistent"
 
 #: What an operator (or the future `--fix` stage) should do about each category.
 #: Kept next to the classification so the advice cannot drift from the reason.
@@ -61,6 +62,15 @@ ACTION_STUCK_DELETE = "retry the remote delete (a 404 counts as success)"
 ACTION_FAILED = "re-uploading the same name retries on this row"
 ACTION_FAILED_UNKNOWN = "remote state unknown: probe first, then retry or mark failed"
 ACTION_UNCONFIRMED_DELETE = "retry the remote delete (a 404 counts as success)"
+ACTION_INCONSISTENT = (
+    "this row records a verdict-less outcome while claiming a state that has one"
+    " — check the write path (or the row itself); nothing here repairs it"
+)
+
+#: The states that may carry ``remote_outcome_unknown``: both mean "concluded
+#: without a verdict from OpenRAG". Anywhere else the flag contradicts the
+#: status, and that contradiction is reported rather than swallowed.
+STATES_THAT_MAY_LACK_A_VERDICT = (DocumentStatus.FAILED, DocumentStatus.DELETED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,19 +180,36 @@ def classify_registry(
     now: datetime,
     rules: StalenessRules,
 ) -> list[Finding]:
-    """Turn unsettled rows into findings, oldest first.
+    """Turn candidate rows into findings, oldest first.
 
-    Only rows that are *unsettled* can become findings; everything else is a
-    document doing exactly what it should. Age decides whether a transitional
-    row is stuck — the state alone cannot, because "in flight" and "abandoned"
-    look identical from the row.
+    The input is a *candidate superset*: ``list_unsettled`` selects anything
+    transitional, failed or flagged, and this function decides. Rows that turn
+    out to be fine (a fresh in-flight operation) are dropped on purpose — that
+    is the age gate, not a silent failure.
+
+    What must **not** be dropped is a contradiction: a row whose flag says "no
+    verdict was received" while its status claims a verdict (``INDEXED``), or a
+    flag on a transitional state where only ``mark_failed``/``mark_deleted`` can
+    legitimately set it. Those are unreachable through the current write paths,
+    which is exactly why they are reported instead of assumed away — if a future
+    write path introduces one, the report is where it should surface.
+
+    Age decides whether a transitional row is stuck: the state alone cannot,
+    because "in flight" and "abandoned" look identical from the row.
     """
     findings: list[Finding] = []
     for document in rows:
         age = (now - document.updated_at).total_seconds()
         category: str | None = None
         action: str | None = None
-        if document.status is DocumentStatus.INDEXING:
+        if (
+            document.remote_outcome_unknown
+            and document.status not in STATES_THAT_MAY_LACK_A_VERDICT
+        ):
+            # Checked first: it outranks the age gate, so a flagged transitional
+            # row cannot hide behind "it may still be in flight".
+            category, action = CATEGORY_INCONSISTENT, ACTION_INCONSISTENT
+        elif document.status is DocumentStatus.INDEXING:
             if age > rules.indexing_seconds:
                 category, action = CATEGORY_STUCK_UPLOAD, ACTION_STUCK_UPLOAD
         elif document.status is DocumentStatus.DELETING:

@@ -541,13 +541,21 @@ class SqlDocumentRepository:
         return [_document_to_domain(m) for m in result.scalars().all()]
 
     async def list_unsettled(self, tenant_id: TenantId) -> list[Document]:
-        """Rows that may need attention: transitional, failed, or unconfirmed.
+        """Candidate rows for the reconciliation report: a deliberate **superset**.
 
         ``INDEXING``/``DELETING`` are included regardless of age — deciding
         whether one is *stuck* needs a threshold, and that call belongs to the
-        reconciliation rules, not to a query. ``remote_outcome_unknown`` is part
-        of the predicate because it is the one flag that makes a row untrustworthy
-        even when its status looks final (an unconfirmed tombstone).
+        reconciliation rules (``classify_registry``), not to a query. So this
+        method answers "which rows could possibly need attention", and the
+        classifier answers "which of them actually do": a fresh in-flight row is
+        returned here and then dropped there, on purpose.
+
+        ``remote_outcome_unknown`` is part of the predicate because it is the one
+        flag that makes a row untrustworthy even when its status looks final (an
+        unconfirmed tombstone). Because the predicate is a superset of what the
+        classifier reports, the two are pinned together by a test that walks the
+        whole status x flag space — a combination that is selected but never
+        classified would otherwise be invisible.
         """
         result = await self._session.execute(
             select(DocumentModel)

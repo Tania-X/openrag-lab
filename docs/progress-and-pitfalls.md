@@ -595,6 +595,7 @@ mark_deleting: INDEXING/DELETING/DELETED → 冲突   （删除撞在途上传 /
 | 幽灵 | 远端有、登记表**任何状态**都没有这个名字 | 决策 5（先只报告） |
 | 缺失 | 登记表说 `INDEXED`、远端没有 | 方向安全，只报 |
 | 陌生命名空间 | 远端名字不属于任何租户前缀（命名空间改造前的遗留） | 归 `reingest_legacy` 处理 |
+| `inconsistent` | 行带着 `remote_outcome_unknown` 却处于"该有定论"的状态 | 查写路径或库，报告不修 |
 
 ### 三条设计取舍
 
