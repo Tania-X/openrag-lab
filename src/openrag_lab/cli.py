@@ -152,7 +152,12 @@ async def _reconcile(tenant_slug: str | None, strict: bool) -> None:
         async with asynccontextmanager(get_session)() as session:
             try:
                 report = await ReconcileService(session, gateway, rules=rules).run(
-                    tenant_slugs=[tenant_slug] if tenant_slug else None
+                    # `is None` rather than truthiness: an explicitly empty
+                    # `--tenant ""` must reach the service's empty-filter guard
+                    # (which refuses it), not be silently widened into "every
+                    # tenant". Rejecting a bad scope and reporting everything are
+                    # different answers, and the caller asked for the first.
+                    tenant_slugs=None if tenant_slug is None else [tenant_slug]
                 )
             except NotFoundError as exc:
                 # A slug that matches nothing is a caller error, not a clean bill

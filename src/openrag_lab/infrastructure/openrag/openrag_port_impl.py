@@ -346,7 +346,9 @@ class OpenRAGGateway:
                 raise OpenRAGError(
                     f"OpenRAG listing returned {len(entries)} entries, at its "
                     f"{LIST_FILES_MAX}-entry ceiling: the list may be truncated, "
-                    "so it cannot be compared against the registry"
+                    "so it cannot be compared against the registry. This tenant "
+                    "stays unreadable until the listing can be paged or the "
+                    "library shrinks — retrying will not change it."
                 )
             return [
                 str(entry["filename"])

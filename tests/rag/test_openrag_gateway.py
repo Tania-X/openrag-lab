@@ -572,6 +572,9 @@ def test_a_full_listing_page_is_refused_rather_than_trusted() -> None:
 
     assert str(LIST_FILES_MAX) in str(caught.value)
     assert "truncated" in str(caught.value)
+    # 这个租户会**永久**读不到(直到列表能分页): 消息要说清重试没用, 否则运维会
+    # 把它当成偶发网络故障反复重跑。
+    assert "retrying will not change it" in str(caught.value)
 
 
 def test_a_listing_just_below_the_ceiling_is_usable() -> None:

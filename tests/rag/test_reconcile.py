@@ -740,3 +740,37 @@ async def test_a_truncated_remote_listing_becomes_unreadable_not_a_screen_of_mis
     assert [e.tenant_slug for e in report.remote_errors] == ["acme"]
     assert "ceiling" in report.remote_errors[0].detail
     assert report.needs_attention is True
+
+
+def test_the_cli_refuses_an_explicitly_empty_tenant() -> None:
+    """`--tenant ""` 必须与 `--tenant typo` 一样被拒绝, 不能被悄悄放宽成全量。
+
+    修复前: 空字符串 falsy → CLI 把过滤构造成 None → 走"遍历全部租户"分支 ——
+    服务层那条空过滤守卫(有测试)在 CLI 路径上**根本不可达**。这正是"只测了渲染/
+    服务层, 没测接线"的经典空转: `test_an_empty_filter_is_refused` 直接调服务层,
+    碰不到 CLI 的短路。
+    """
+    import tempfile
+    from pathlib import Path
+
+    from typer.testing import CliRunner
+
+    from openrag_lab.cli import app
+
+    with tempfile.TemporaryDirectory() as tmp:
+        previous = get_settings().database_url
+        object.__setattr__(
+            get_settings(), "database_url",
+            f"sqlite+aiosqlite:///{Path(tmp) / 'cli-empty.db'}",
+        )
+        try:
+            result = CliRunner().invoke(app, ["reconcile", "--tenant", ""])
+        finally:
+            object.__setattr__(get_settings(), "database_url", previous)
+
+    assert result.exit_code == 1, result.output
+    assert "nothing needs attention" not in result.output, "空值不能变成一次全量绿灯"
+    assert isinstance(result.exception, SystemExit), (
+        f"应是有意的 typer.Exit, 实际 {type(result.exception).__name__}"
+    )
+    assert "Traceback" not in result.output
